@@ -1,0 +1,10 @@
+# Job dependencies (mirrored in Docker/Dockerfile).
+pandas
+numpy
+requests
+rasterio  # M2 static branch (DEM/POLARIS windowed reads, covariate stack)
+scikit-learn  # M3 behavioural clustering + random-forest attribution
+matplotlib  # M3 figure set
+
+# Submit-host only: needed to run workflow_generator.py, not inside jobs.
+pegasus-wms.api

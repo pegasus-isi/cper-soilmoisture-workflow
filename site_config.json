@@ -1,0 +1,152 @@
+{
+  "site": "cper",
+  "description": "USDA-ARS Central Plains Experimental Range (CPER), ~15,000 acres of shortgrass steppe in Weld County, CO. Real-time soil-moisture mapping domain. Reference point: NEON site CPER, domain D10, 40.815536 / -104.745591, ~1650 m.",
+  "bbox": {
+    "comment": "Approximate CPER boundary; replace with the ARS pasture-boundary extent once provided (SPEC.md section 11 Q2/Q10).",
+    "min_lat": 40.75,
+    "max_lat": 40.88,
+    "min_lon": -104.80,
+    "max_lon": -104.68
+  },
+  "date_range": {
+    "comment": "Default fetch window for characterize/historical runs. SCAN Nunn #1 soil moisture reaches back to 1997-03.",
+    "start": "2020-01-01",
+    "end": "2026-07-01"
+  },
+  "analysis": {
+    "nowcast_window_days": 30,
+    "historical_window": { "start": "1997-01-01", "end": "2026-07-01" },
+    "min_reporting_stations": 3,
+    "min_stations_for_regression": 8,
+    "min_stations_for_regression_comment": "M4 tier 2 (random-forest regression on covariates) needs this many DISTINCT reporting locations before it engages -- deliberately higher than min_reporting_stations. The public network gives ~7, and a 49-covariate forest fitted to 7 points is decoration, so tier 2 stays off and the output records why. Raise/lower only with a reason.",
+    "max_current_age_days": 5,
+    "surface_depth_max_cm": 20,
+    "decorrelation_length_m": 2000,
+    "station_free_zone_penalty": 0.03,
+    "min_zone_polygon_ha": 1.0,
+    "m4_uncertainty_comment": "decorrelation_length_m sets how fast the distance term in the uncertainty layer saturates (it saturates AT the observed between-station spread, not at an invented constant). station_free_zone_penalty is added in quadrature wherever a zone has no station. min_zone_polygon_ha only tags small polygons in the geojson; nothing is dropped.",
+    "cluster_k_candidates": [3, 4, 5, 6, 7, 8],
+    "sm_thresholds": {
+      "comment": "Volumetric fraction breakpoints -> class, tuned down from the forest defaults: shortgrass-steppe sandy loams rarely exceed ~0.35 m3/m3.",
+      "breakpoints": [0.06, 0.12, 0.20, 0.30],
+      "labels": ["very_dry", "dry", "moderate", "moist", "saturated"]
+    }
+  },
+  "stations": [
+    {
+      "id": "USCRN:94074",
+      "name": "Nunn 7 NNE (Ag. Res. Svc. Central Plains Exp. Range)",
+      "network": "USCRN",
+      "lat": 40.81,
+      "lon": -104.76,
+      "elevation_m": null,
+      "depths_cm": [5, 10, 20, 50, 100],
+      "sensor": "USCRN triplicate soil probes",
+      "install_date": "2009",
+      "comment": "lat/lon as published in the daily01 data rows (verified 2026-07-29); the fetcher still reads the per-row columns at fetch time. Config values feed static-branch station_covariates extraction."
+    },
+    {
+      "id": "SCAN:2197",
+      "name": "CPER",
+      "network": "SCAN",
+      "station_triplet": "2197:CO:SCAN",
+      "lat": 40.8228,
+      "lon": -104.7107,
+      "elevation_m": null,
+      "depths_cm": [5, 10, 20, 51, 102],
+      "sensor": "SCAN dielectric probes (-2/-4/-8/-20/-40 in)",
+      "install_date": "2013-09",
+      "comment": "lat/lon from the AWDB /stations metadata endpoint (verified 2026-07-29); the fetcher still queries it at fetch time. Config values feed static-branch station_covariates extraction."
+    },
+    {
+      "id": "SCAN:2017",
+      "name": "Nunn #1",
+      "network": "SCAN",
+      "station_triplet": "2017:CO:SCAN",
+      "lat": 40.8599,
+      "lon": -104.7403,
+      "elevation_m": null,
+      "depths_cm": [5, 10, 20, 51, 102],
+      "sensor": "SCAN dielectric probes (-2/-4/-8/-20/-40 in)",
+      "install_date": "1997-03",
+      "comment": "lat/lon from the AWDB /stations metadata endpoint (verified 2026-07-29); the fetcher still queries it at fetch time. Config values feed static-branch station_covariates extraction."
+    },
+    {
+      "id": "NEON:CPER",
+      "name": "NEON CPER soil plots SP1-SP5",
+      "network": "NEON",
+      "lat": 40.815536,
+      "lon": -104.745591,
+      "elevation_m": 1650,
+      "depths_cm": null,
+      "sensor": "NEON DP1.00094.001 soil water content profiles",
+      "install_date": "2016-07",
+      "comment": "Five instrumented plots; per-plot coordinates and depths come from the sensor_positions file at fetch time"
+    }
+  ],
+  "uscrn": {
+    "station_file_slug": "CO_Nunn_7_NNE",
+    "wban": "94074",
+    "node": "USCRN:94074",
+    "base_url": "https://www.ncei.noaa.gov/pub/data/uscrn/products/daily01"
+  },
+  "awdb": {
+    "comment": "NRCS AWDB REST API, same service as SNOTEL. Gotcha: /stations silently ignores stateCodes/networkCodes; always filter by explicit stationTriplets.",
+    "stations": [
+      { "station_triplet": "2197:CO:SCAN", "node": "SCAN:2197" },
+      { "station_triplet": "2017:CO:SCAN", "node": "SCAN:2017" }
+    ],
+    "duration": "DAILY",
+    "elements": ["SMS", "STO", "PRCP", "PREC", "TOBS", "TAVG", "RHUM", "WSPD"]
+  },
+  "neon": {
+    "site": "CPER",
+    "products": {
+      "soil_moisture": "DP1.00094.001"
+    },
+    "package": "basic",
+    "api_base": "https://data.neonscience.org/api/v0",
+    "available_from": "2016-07",
+    "publication_lag_months": 1,
+    "available_note": "DP1.00094.001 at CPER starts 2016-07 (120 months verified 2026-07-29) and publishes ~1 month behind. characterize fans out one fetch job per month across this range; months outside it are not requested.",
+    "comment": "Requires NEON_TOKEN in the job environment (injected by the generator via add_env). DP1.00006.001 precip is NOT available at CPER; use DP1.00044.001 if precip is added later."
+  },
+  "sage": {
+    "comment": "Sage/Waggle nodes at or near CPER. X001 (NEON tower coords) is deployed but publishes nothing to the public query API as of 2026-07; H019 is a LoRaWAN gateway with system telemetry only. Kept for the day X001 starts publishing - expect empty output until then.",
+    "nodes": [],
+    "_known_nodes_not_publishing": [
+      { "vsn": "X001", "lat": 40.815536, "lon": -104.745591, "note": "PTZ camera, LoRaWAN, Orin AGX; publishes nothing public yet" },
+      { "vsn": "H019", "lat": 40.8416, "lon": -104.7161, "note": "LoRaWAN gateway near the ARS/LTAR station; system telemetry only" }
+    ],
+    "measurements": {
+      "soil_moisture": ["env.soil.moisture", "env.soil.water_content"],
+      "soil_temp": ["env.soil.temperature"],
+      "air_temp": ["env.temperature"],
+      "rel_humidity": ["env.relative_humidity"],
+      "pressure": ["env.pressure"],
+      "wind_speed": ["env.wind.speed"],
+      "precip": ["env.raingauge.total_acc", "env.precipitation"]
+    }
+  },
+  "static_layers": {
+    "comment": "M2 (Phase 2) inputs - defined here so the analysis grid is fixed before any raster work starts. Not consumed by any M1 job.",
+    "analysis_grid": {
+      "crs": "EPSG:32613",
+      "resolution_m": 10,
+      "comment": "UTM 13N, 10 m; bbox snapped to the grid at build time"
+    },
+    "soil": {
+      "polaris_base": "http://hydrology.cee.duke.edu/POLARIS/PROPERTIES/v1.0",
+      "polaris_stat": "mean",
+      "polaris_variables": ["theta_s", "theta_r", "alpha", "n", "ksat", "clay", "sand", "silt", "bd", "om"],
+      "polaris_depths": ["0_5", "5_15", "15_30", "30_60"],
+      "polaris_note": "van Genuchten params direct from POLARIS - no pedotransfer (SPEC.md section 10). ksat/alpha/om are log10 on the server; the fetcher converts back to linear.",
+      "sda_endpoint": "https://sdmdataaccess.sc.egov.usda.gov/Tabular/post.rest",
+      "sda_note": "POST-only; WKT is lon-lat; helper SDA_Get_Mukey_from_intersection_with_WktWgs84"
+    },
+    "terrain": {
+      "dem_10m_cog": "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/n41w105/USGS_13_n41w105.tif",
+      "lidar_projects": ["CO_EasternColorado_2018_A18", "CO_NorthwestCO_2020_D20"]
+    }
+  }
+}

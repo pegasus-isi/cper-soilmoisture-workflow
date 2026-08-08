@@ -1,0 +1,40 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Pegasus run artifacts
+scratch/
+output/
+output.tgz
+cc/
+*.dag
+*.dag.*
+
+# Generated per-run catalogs and DAGs — produced by workflow_generator.py,
+# and replicas.yml/workflow.yml embed absolute local paths and the NEON token.
+workflow.yml
+fetch.yml
+observe.yml
+static.yml
+characterize.yml
+nowcast.yml
+all.yml
+wf_*.yml
+replicas.yml
+sites.yml
+transformations.yml
+pegasus.properties
+*_dag.png
+
+# Local-only working notes (deployment-specific; see the team, not the repo)
+SESSION_CONTEXT.md
+TROUBLESHOOTING.md
+feedback.txt
+CLAUDE.md
+
+# Agent/editor local state
+.claude/
+.idea/
+.DS_Store
