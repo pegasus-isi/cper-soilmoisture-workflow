@@ -86,19 +86,19 @@ USCRN only.
 
 ## 2. Build the container
 
-Every workflow job runs inside `kthare10/cper-soilmoisture`, pulled from Docker
+Every workflow job runs inside `pegasus/cper-soilmoisture`, pulled from Docker
 Hub and converted to Singularity/Apptainer.
 
 ```sh
-docker build -t kthare10/cper-soilmoisture:m3 Docker/
-docker push kthare10/cper-soilmoisture:m3           # docker login first
+docker build -t pegasus/cper-soilmoisture:m3 Docker/
+docker push pegasus/cper-soilmoisture:m3           # docker login first
 ```
 
 On Apple Silicon targeting an amd64 pool, build multi-arch:
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 \
-    -t kthare10/cper-soilmoisture:m3 --push Docker/
+    -t pegasus/cper-soilmoisture:m3 --push Docker/
 ```
 
 The image is lean (`python:3.11-slim` + pandas/numpy/requests/rasterio/
@@ -113,7 +113,7 @@ import-time crash happens before the scripts can write their declared outputs,
 so HTCondor *holds* the jobs on stage-out instead of failing them:
 
 ```sh
-docker run --rm --platform linux/amd64 kthare10/cper-soilmoisture:m3 \
+docker run --rm --platform linux/amd64 pegasus/cper-soilmoisture:m3 \
     python3 -c "import rasterio, sklearn, matplotlib, pandas"
 ```
 
@@ -325,7 +325,7 @@ The other modes exist to do *less*:
 --reuse-dir DIR                        reuse already-fetched/computed products
 --config PATH                          default: site_config.json
 -e / --execution-site-name NAME        default: condorpool
---container-image IMAGE                default: kthare10/cper-soilmoisture:m3
+--container-image IMAGE                default: pegasus/cper-soilmoisture:m3
 --no-container                         run in the site's native environment
 -o / --output FILE                     default: workflow.yml
 ```
@@ -520,7 +520,7 @@ bin/
   delineate_zones.py         Covariate-grid zones + validation
   estimate_soil_moisture.py  Gridded upscaling + uncertainty + skill
   visualize_soil_moisture.py Map figure + self-contained HTML
-Docker/                  Container (kthare10/cper-soilmoisture, python:3.11-slim)
+Docker/                  Container (pegasus/cper-soilmoisture, python:3.11-slim)
 SPEC.md                  Contract, architecture, evaluation, verified sources
 ```
 

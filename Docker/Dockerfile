@@ -7,7 +7,7 @@
 # and matplotlib (the figure set). Terrain derivatives and the recession fits
 # stay in plain numpy (SPEC.md "Container"), so scipy arrives only as an
 # sklearn dependency and geopandas still isn't needed. Published as
-# kthare10/cper-soilmoisture:m3 — a new tag per SPEC.md, never a mutated
+# pegasus/cper-soilmoisture:m3 — a new tag per SPEC.md, never a mutated
 # :latest.
 FROM python:3.11-slim
 

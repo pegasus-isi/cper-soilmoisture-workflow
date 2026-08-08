@@ -442,8 +442,12 @@ answers the question better than documentation.
 
 ### Container
 
+Published as **`pegasus/cper-soilmoisture`** (moved from the personal
+`kthare10/` namespace on 2026-08-08, once org access was available; the tag
+scheme is unchanged).
+
 M1 runs on a lean `python:3.11-slim` + pandas/numpy/requests image
-(`kthare10/cper-soilmoisture:latest`). **M2 (`:m2`, built 2026-08-03)** adds
+(`:latest`). **M2 (`:m2`, built 2026-08-03)** adds
 only **rasterio** — keeping terrain derivatives in numpy meant no
 scipy/whitebox/geopandas were needed, so the image stayed on `python:3.11-slim`
 instead of moving to a GDAL base. New tag per change; `:latest` is not mutated.

@@ -764,7 +764,7 @@ def main():
     parser.add_argument("-e", "--execution-site-name", default="condorpool",
                         help="HTCondor pool name for execution")
     parser.add_argument("--container-image",
-                        default="kthare10/cper-soilmoisture:m3",
+                        default="pegasus/cper-soilmoisture:m3",
                         help="Docker container image for workflow jobs "
                              "(:m3 adds scikit-learn/matplotlib; SPEC.md "
                              "'Container': new tag, don't mutate :latest)")

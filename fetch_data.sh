@@ -32,7 +32,7 @@ cd "$(dirname "$0")"
 
 JOBS=6
 OUT=output
-IMAGE=kthare10/cper-soilmoisture:m3
+IMAGE=pegasus/cper-soilmoisture:m3
 RUNNER=auto
 GEN_ARGS=()
 
