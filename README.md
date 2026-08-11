@@ -173,6 +173,30 @@ pegasus-status <submit-dir>
 Pegasus prunes the job that would have produced it — so the run starts at
 `harmonize` instead of re-downloading. Results stage into `output/`.
 
+### From a notebook, or any Python
+
+`workflow_generator.py` is importable. `build_workflow()` takes the same
+options as the command line — long names, dashes as underscores — and returns a
+workflow object you can drive in place, which is what
+`Access-CPER-SoilMoisture-Workflow.ipynb` does:
+
+```python
+from workflow_generator import build_workflow
+
+fetch = build_workflow(mode="fetch", output_dir="inputs")
+fetch.plan_submit()          # pegasus-plan --submit -s <site> -o local
+fetch.wait()                 # blocks until the DAG finishes
+
+run = build_workflow(mode="all", reuse_dir="inputs")   # build AFTER the fetch
+run.plan_submit()
+run.wait()
+run.statistics()             # per-stage cost; .analyze() if it failed
+```
+
+Build the second workflow *after* the first finishes: reuse is resolved at
+build time, and the catalogs use fixed filenames, so the last workflow built
+owns them.
+
 **Which directory you point it at decides what gets recomputed**, and this is
 the whole trick:
 

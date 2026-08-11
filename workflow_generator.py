@@ -164,6 +164,9 @@ class CperSoilMoistureWorkflow:
         self.reuse_dir = os.path.abspath(reuse_dir) if reuse_dir else None
         self.reused = []
         self.produced = []
+        # Set by create_sites_catalog / create_workflow; plan_submit() defaults
+        # to it so a caller never has to repeat the site name.
+        self.exec_site_name = "condorpool"
 
     def write(self):
         if self.sc is not None:
@@ -172,6 +175,53 @@ class CperSoilMoistureWorkflow:
         self.rc.write()
         self.tc.write()
         self.wf.write(file=self.dagfile)
+
+    # --- Run lifecycle -----------------------------------------------------
+    # Thin wrappers over the Pegasus Workflow object, so a notebook can drive a
+    # run the same way the ACCESS Pegasus examples do -- plan_submit(), then
+    # status()/wait()/statistics() -- instead of shelling out to the CLI and
+    # scraping stdout for a run directory. Every one of them needs the object
+    # that planned the run, which is why the notebook imports build_workflow()
+    # rather than invoking this file as a script.
+
+    def plan_submit(self, sites=None, output_site="local", submit=True):
+        """Plan (and by default submit) this workflow."""
+        try:
+            self.wf.plan(sites=sites or [self.exec_site_name],
+                         output_sites=[output_site], submit=submit)
+        except PegasusClientError as exc:
+            print(exc)
+        return self
+
+    def status(self, long=True):
+        try:
+            self.wf.status(long=long)
+        except PegasusClientError as exc:
+            print(exc)
+        return self
+
+    def wait(self):
+        """Block until the run finishes. Pegasus prints its own progress."""
+        try:
+            self.wf.wait()
+        except PegasusClientError as exc:
+            print(exc)
+        return self
+
+    def statistics(self):
+        try:
+            self.wf.statistics()
+        except PegasusClientError as exc:
+            print(exc)
+        return self
+
+    def analyze(self):
+        """Why did it fail -- the first failing job and its logs."""
+        try:
+            self.wf.analyze()
+        except PegasusClientError as exc:
+            print(exc)
+        return self
 
     def create_pegasus_properties(self, inherit_pegasusrc=False):
         self.props = Properties()
@@ -201,6 +251,7 @@ class CperSoilMoistureWorkflow:
                              universe="container"):
         logger.info("Creating site catalog for execution site: %s (%s universe)",
                     exec_site_name, universe)
+        self.exec_site_name = exec_site_name
         self.sc = SiteCatalog()
         local = Site("local").add_directories(
             Directory(Directory.SHARED_SCRATCH, self.shared_scratch_dir).add_file_servers(
@@ -807,7 +858,7 @@ class CperSoilMoistureWorkflow:
         self.wf.add_dependency(zone_job, children=[mviz])
 
 
-def main():
+def _build_parser():
     parser = argparse.ArgumentParser(
         description="Generate the Pegasus workflow for CPER soil-moisture mapping"
     )
@@ -886,8 +937,15 @@ def main():
                              "is how you download once and run many times.")
     parser.add_argument("-o", "--output", default="workflow.yml",
                         help="Output workflow file")
-    args = parser.parse_args()
+    return parser
 
+
+def _resolve(args):
+    """Normalise and validate args in place; return the loaded site config.
+
+    Raises ValueError rather than exiting, so importing this module from a
+    notebook cannot kill the kernel on a bad argument.
+    """
     args.sources = [s for s in ALL_SOURCES if s in args.sources]
 
     if args.reuse_dir and args.mode == "fetch":
@@ -896,8 +954,7 @@ def main():
                        "the entire DAG.")
         args.reuse_dir = None
     if args.reuse_dir and not os.path.isdir(args.reuse_dir):
-        logger.error("--reuse-dir %s is not a directory", args.reuse_dir)
-        sys.exit(1)
+        raise ValueError("--reuse-dir %s is not a directory" % args.reuse_dir)
     if args.mode == "nowcast" and not args.reuse_dir:
         # M4 measures each station's anomaly against its own monthly
         # climatology, which station_response derives from the fetched record.
@@ -926,18 +983,17 @@ def main():
             )
             args.sources = [s for s in args.sources if s != "neon"]
         if not args.sources:
-            logger.error("No usable sources selected")
-            sys.exit(1)
+            raise ValueError("No usable sources selected")
 
     # --exec-universe defaults to 'container' (see the flag's help), but there
     # is nothing for that universe to start when --no-container removed the
     # container, so that flag falls back to vanilla rather than erroring.
     if args.no_container:
         if args.exec_universe == "container":
-            logger.error("--exec-universe container and --no-container "
-                         "contradict each other: the container universe exists "
-                         "to run the container. Pick one.")
-            sys.exit(1)
+            raise ValueError(
+                "--exec-universe container and --no-container contradict each "
+                "other: the container universe exists to run the container. "
+                "Pick one.")
         args.exec_universe = "vanilla"
     elif args.exec_universe is None:
         args.exec_universe = "container"
@@ -947,77 +1003,109 @@ def main():
                        "profile, so the submit host's own catalog decides.")
 
     if not os.path.exists(args.config):
-        logger.error("Config file not found: %s", args.config)
-        sys.exit(1)
+        raise ValueError("Config file not found: %s" % args.config)
     with open(args.config) as fh:
-        config = json.load(fh)
+        return json.load(fh)
 
-    try:
-        wf = CperSoilMoistureWorkflow(dagfile=args.output,
-                                      reuse_dir=args.reuse_dir,
-                                      output_dir=args.output_dir)
-        wf.create_pegasus_properties(
-            inherit_pegasusrc=args.inherit_pegasusrc)
-        if args.no_sites_catalog:
-            logger.info("Not writing sites.yml: planning will use the submit "
-                        "host's own site catalog. Site '%s' must exist there.",
-                        args.execution_site_name)
-        else:
-            wf.create_sites_catalog(exec_site_name=args.execution_site_name,
-                                    universe=args.exec_universe)
-        wf.create_replica_catalog()
-        wf.create_transformation_catalog(
-            exec_site_name=args.execution_site_name,
-            container_image=args.container_image,
-            use_container=not args.no_container,
-        )
-        wf.create_workflow(args, config)
+
+def build_workflow(write=True, **overrides):
+    """Build (and by default write) the workflow, returning the object.
+
+    This is the entry point for notebooks: it takes the same options as the
+    command line, by their long names with dashes as underscores, and hands
+    back a CperSoilMoistureWorkflow whose .plan_submit()/.wait()/.statistics()
+    drive the run. Defaults come from the argument parser itself, so the CLI
+    and a notebook cannot drift apart.
+
+        fetch = build_workflow(mode="fetch", output_dir="inputs")
+        fetch.plan_submit().wait()
+    """
+    defaults = vars(_build_parser().parse_args([]))
+    unknown = sorted(set(overrides) - set(defaults))
+    if unknown:
+        raise TypeError("unknown option(s): %s. Known: %s"
+                        % (", ".join(unknown), ", ".join(sorted(defaults))))
+    args = argparse.Namespace(**dict(defaults, **overrides))
+    config = _resolve(args)
+
+    wf = CperSoilMoistureWorkflow(dagfile=args.output,
+                                  reuse_dir=args.reuse_dir,
+                                  output_dir=args.output_dir)
+    wf.create_pegasus_properties(inherit_pegasusrc=args.inherit_pegasusrc)
+    if args.no_sites_catalog:
+        logger.info("Not writing sites.yml: planning will use the submit "
+                    "host's own site catalog. Site '%s' must exist there.",
+                    args.execution_site_name)
+        wf.exec_site_name = args.execution_site_name
+    else:
+        wf.create_sites_catalog(exec_site_name=args.execution_site_name,
+                                universe=args.exec_universe)
+    wf.create_replica_catalog()
+    wf.create_transformation_catalog(
+        exec_site_name=args.execution_site_name,
+        container_image=args.container_image,
+        use_container=not args.no_container,
+    )
+    wf.create_workflow(args, config)
+    if write:
         wf.write()
 
-        logger.info("\n" + "=" * 70)
-        logger.info("WORKFLOW GENERATION COMPLETE")
-        logger.info("=" * 70)
-        logger.info("  Workflow file: %s", args.output)
-        logger.info("  Mode: %s (%s)", args.mode,
-                    ", ".join(BRANCH_LABELS.get(b, b)
-                              for b in sorted(MODE_BRANCHES[args.mode])))
-        logger.info("  Sources: %s", ", ".join(args.sources))
-        logger.info("  Outputs: %s", wf.local_storage_dir)
-        logger.info("  Execution: site %s, %s", args.execution_site_name,
-                    "site catalog from the submit host"
-                    if args.no_sites_catalog
-                    else "%s universe, container %s" % (
-                        args.exec_universe,
-                        "disabled" if args.no_container else args.container_image))
-        logger.info("  Jobs: %d", len(wf.wf.jobs))
-        summary = wf.reuse_summary()
-        if summary:
-            logger.info("  Data reuse: %d of %d outputs already present in %s",
-                        summary["n_reused"], summary["n_total_outputs"],
-                        summary["reuse_dir"])
-            if summary["n_reused"] == 0:
-                logger.warning("  --reuse-dir matched nothing. Pegasus prunes a "
-                               "job only when EVERY one of its outputs is in "
-                               "the replica catalog, so nothing will be "
-                               "skipped. Check the directory holds the LFNs "
-                               "verbatim (e.g. neon_observations_2016-07.csv).")
-            else:
-                logger.info("  Pegasus will prune the producing jobs during "
-                            "planning; `pegasus-plan --force` disables that.")
-        logger.info("\nNext steps:")
-        logger.info("  1. Review workflow: %s", args.output)
-        logger.info("  2. Submit: pegasus-plan --submit -s %s -o local %s",
-                    args.execution_site_name, args.output)
-        logger.info("  3. Monitor: pegasus-status <submit_dir>")
-        if args.mode == "fetch":
-            logger.info("\nThis is a download-only DAG. When it finishes, run "
-                        "the real workflow against its outputs:")
-            logger.info("  ./workflow_generator.py --reuse-dir %s -o workflow.yml",
-                        wf.local_storage_dir)
-        logger.info("=" * 70 + "\n")
+    logger.info("\n" + "=" * 70)
+    logger.info("WORKFLOW GENERATION COMPLETE")
+    logger.info("=" * 70)
+    logger.info("  Workflow file: %s", args.output)
+    logger.info("  Mode: %s (%s)", args.mode,
+                ", ".join(BRANCH_LABELS.get(b, b)
+                          for b in sorted(MODE_BRANCHES[args.mode])))
+    logger.info("  Sources: %s", ", ".join(args.sources))
+    logger.info("  Outputs: %s", wf.local_storage_dir)
+    logger.info("  Execution: site %s, %s", args.execution_site_name,
+                "site catalog from the submit host"
+                if args.no_sites_catalog
+                else "%s universe, container %s" % (
+                    args.exec_universe,
+                    "disabled" if args.no_container else args.container_image))
+    logger.info("  Jobs: %d", len(wf.wf.jobs))
+    summary = wf.reuse_summary()
+    if summary:
+        logger.info("  Data reuse: %d of %d outputs already present in %s",
+                    summary["n_reused"], summary["n_total_outputs"],
+                    summary["reuse_dir"])
+        if summary["n_reused"] == 0:
+            logger.warning("  --reuse-dir matched nothing. Pegasus prunes a "
+                           "job only when EVERY one of its outputs is in "
+                           "the replica catalog, so nothing will be "
+                           "skipped. Check the directory holds the LFNs "
+                           "verbatim (e.g. neon_observations_2016-07.csv).")
+        else:
+            logger.info("  Pegasus will prune the producing jobs during "
+                        "planning; `pegasus-plan --force` disables that.")
+    logger.info("=" * 70 + "\n")
+    return wf
+
+
+def main():
+    args = _build_parser().parse_args()
+    try:
+        wf = build_workflow(**vars(args))
+    except ValueError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
     except Exception as exc:
         logger.error("Failed to generate workflow: %s", exc)
         raise
+
+    logger.info("Next steps:")
+    logger.info("  1. Review workflow: %s", args.output)
+    logger.info("  2. Submit: pegasus-plan --submit -s %s -o local %s",
+                args.execution_site_name, args.output)
+    logger.info("  3. Monitor: pegasus-status <submit_dir>")
+    if args.mode == "fetch":
+        logger.info("\nThis is a download-only DAG. When it finishes, run "
+                    "the real workflow against its outputs:")
+        logger.info("  ./workflow_generator.py --reuse-dir %s -o workflow.yml",
+                    wf.local_storage_dir)
+    logger.info("")
 
 
 if __name__ == "__main__":
