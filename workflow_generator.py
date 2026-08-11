@@ -184,6 +184,16 @@ class CperSoilMoistureWorkflow:
     # that planned the run, which is why the notebook imports build_workflow()
     # rather than invoking this file as a script.
 
+    @property
+    def submit_dir(self):
+        """The run directory once plan_submit() has succeeded, else None.
+
+        status()/wait()/statistics() all require it — the Pegasus API raises
+        without one — so this is the honest test of "did the run start", and
+        what a notebook should gate its monitoring cells on.
+        """
+        return getattr(self.wf, "_submit_dir", None)
+
     def plan_submit(self, sites=None, output_site="local", submit=True):
         """Plan (and by default submit) this workflow."""
         try:
@@ -191,6 +201,8 @@ class CperSoilMoistureWorkflow:
                          output_sites=[output_site], submit=submit)
         except PegasusClientError as exc:
             print(exc)
+        if self.submit_dir:
+            logger.info("Run directory: %s", self.submit_dir)
         return self
 
     def status(self, long=True):
