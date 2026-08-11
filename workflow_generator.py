@@ -6,50 +6,54 @@ Builds the workflow described in SPEC.md: real-time soil-moisture mapping
 for the USDA-ARS Central Plains Experimental Range from public in-situ sensor
 networks (USCRN, NRCS SCAN, NEON) plus, later, the ARS station network.
 
-**--mode all is the default and runs the whole pipeline, M1 through M4**, ending
-in the gridded dynamic map. The other modes exist to scale *back* when that is
-more than you want:
+**--mode all is the default and runs the whole pipeline**, ending in the gridded
+dynamic map. The other modes exist to scale *back* when that is more than you
+want:
 
     all          (default) everything below, on the historical window
     nowcast      everything, but on the last analysis.nowcast_window_days days.
                  Identical DAG to `all`; with --reuse-dir the expensive static
                  and characterization branches are pruned by Pegasus data
                  reuse and what is left is a handful of jobs (constraint C4).
-    characterize M1+M2+M3 — fingerprints, zones and attribution, no gridded map
-    static       M2 only — the covariate stack
-    observe      M1 only — fetch, harmonize, point-scale layer
+    characterize everything except the gridded map — fingerprints, zones and
+                 attribution
+    static       the covariate stack only
+    observe      observations only — fetch, harmonize, point-scale layer
     fetch        download only: every fetcher, outputs staged out and
                  registered, nothing computed. Run this once, then point a real
                  run at it with --reuse-dir so nothing is downloaded twice.
 
 Full DAG (--mode all). NEON serves one package per site-month, so a multi-year
-window fans out per month; fingerprints then fan out per station:
+window fans out per month; fingerprints then fan out per station, and the
+attribution fans out per response metric:
 
     fetch_neon --month 2016-07 ┐
-        ... one job per month ...─> harmonize ─┬─> soil_moisture_map ────────┐
-    fetch_neon --month 2026-07 ┤   (M1)        │      (point scale)          │
-    fetch_uscrn, fetch_awdb ───┘               ├─> station_response x N ─┐   │
-                                               │        (M3)             │   │
-    fetch_soil_properties ─┐                   │                         v   │
-    fetch_terrain ─────────┴─> build_covariates ────────> station_similarity  │
-                                    (M2)       │                    │         │
-                                               │                    v         │
-                                               └──────────> delineate_zones    │
-                                                                    │         │
-                                                    zones.tif ──────┤         │
-                                                                    v         v
-                                                        estimate_soil_moisture
-                                                              (M4)     │
-                                                                       v
-                                                        visualize_soil_moisture
-                                                        soil_moisture_now.tif
-                                                        soil_moisture_uncertainty.tif
-                                                        soil_moisture_map.png / .html
+        ... one job per month ...─> harmonize ─┬─> soil_moisture_map ──────────┐
+    fetch_neon --month 2026-07 ┤               │      (point scale)            │
+    fetch_uscrn, fetch_awdb ───┘               ├─> station_response x N ─┐     │
+                                               │                        │     │
+    fetch_soil_properties ─┐                   │        similarity_cluster     │
+    fetch_terrain ─────────┴─> build_covariates│             │   │             │
+                                  │            │  attribute x9 ┘   │           │
+                                  │            │      │            │           │
+                                  │            │ similarity_merge  │           │
+                                  v            v                   v           │
+                              delineate_zones <────────────────────-┘           │
+                                      │                                        │
+                              zones.tif ────┐                                  │
+                                            v                                  v
+                                        estimate_soil_moisture <───────────────-┘
+                                                │
+                                                v
+                                        visualize_soil_moisture
+                                        soil_moisture_now.tif
+                                        soil_moisture_uncertainty.tif
+                                        soil_moisture_map.png / .html
 
-In every mode that includes both M1 and M2, harmonize feeds build_covariates so
-the covariate table gains per-depth node coordinates (emitted as
-node_covariates.csv) — without it every NEON depth-node would inherit the
-tower's soil and terrain.
+In every mode that includes both the observation and static branches, harmonize
+feeds build_covariates so the covariate table gains per-depth node coordinates
+(emitted as node_covariates.csv) — without it every NEON depth-node would
+inherit the tower's soil and terrain.
 
 Usage:
     ./workflow_generator.py --config site_config.json -o workflow.yml
@@ -76,7 +80,7 @@ ALL_SOURCES = ("uscrn", "awdb", "neon", "sage")
 
 MODES = ("fetch", "observe", "static", "characterize", "nowcast", "all")
 
-# Which milestones each mode builds. `all` and `nowcast` differ only in the
+# Which branches each mode builds. `all` and `nowcast` differ only in the
 # fetch window: the DAG is identical, so a nowcast run planned against
 # registered static/zone products reduces to a few jobs (SPEC.md C4).
 MODE_BRANCHES = {
@@ -86,6 +90,17 @@ MODE_BRANCHES = {
     "characterize": {"m1", "m2", "m3"},
     "nowcast":      {"m1", "m2", "m3", "m4"},
     "all":          {"m1", "m2", "m3", "m4"},
+}
+
+# What those branch ids mean, for the generation summary. The ids stay as they
+# are because SPEC.md is the design record and still numbers the branches;
+# nothing a user reads should need that numbering to make sense.
+BRANCH_LABELS = {
+    "fetch": "download only",
+    "m1": "observations",
+    "m2": "covariates",
+    "m3": "characterization",
+    "m4": "gridded map",
 }
 
 # Fan NEON out per month only when the window is long enough to be worth the
@@ -151,12 +166,34 @@ class CperSoilMoistureWorkflow:
         self.tc.write()
         self.wf.write(file=self.dagfile)
 
-    def create_pegasus_properties(self):
+    def create_pegasus_properties(self, inherit_pegasusrc=False):
         self.props = Properties()
+        # pegasus-plan reads ./pegasus.properties INSTEAD of ~/.pegasusrc, so on
+        # a managed submit host (ACCESS Pegasus writes its site catalog pointer,
+        # staging site and data configuration into ~/.pegasusrc) the file we
+        # generate here silently shadows the platform's own settings. Opt in to
+        # layering ours on top of theirs.
+        if inherit_pegasusrc:
+            rc_path = Path.home() / ".pegasusrc"
+            if rc_path.exists():
+                n = 0
+                for line in rc_path.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith(("#", "!")) or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    self.props[key.strip()] = value.strip()
+                    n += 1
+                logger.info("Inherited %d properties from %s", n, rc_path)
+            else:
+                logger.warning("--inherit-pegasusrc: no %s to inherit from",
+                               rc_path)
         self.props["pegasus.transfer.threads"] = "16"
 
-    def create_sites_catalog(self, exec_site_name="condorpool"):
-        logger.info("Creating site catalog for execution site: %s", exec_site_name)
+    def create_sites_catalog(self, exec_site_name="condorpool",
+                             universe="container"):
+        logger.info("Creating site catalog for execution site: %s (%s universe)",
+                    exec_site_name, universe)
         self.sc = SiteCatalog()
         local = Site("local").add_directories(
             Directory(Directory.SHARED_SCRATCH, self.shared_scratch_dir).add_file_servers(
@@ -166,9 +203,19 @@ class CperSoilMoistureWorkflow:
                 FileServer("file://" + self.local_storage_dir, Operation.ALL)
             ),
         )
+        # universe="container" (the default) hands the container to HTCondor
+        # instead of having PegasusLite run apptainer itself; Pegasus stages the
+        # image in as a data dependency and HTCondor's file transfer moves it to
+        # the worker. Pegasus recommends it for every HTCondor pool, and it is
+        # the *only* thing that works where the execution point is already an
+        # unprivileged container (OSG / OSPool / PATh, which is what ACCESS
+        # Pegasus provisions): a nested unprivileged apptainer cannot set up its
+        # mount namespace and dies with "Failed to set mount propagation:
+        # Permission denied" before the task starts. universe="vanilla" is the
+        # fallback for a pool whose HTCondor predates container universe.
         exec_site = (
             Site(exec_site_name)
-            .add_condor_profile(universe="vanilla")
+            .add_condor_profile(universe=universe)
             .add_pegasus_profile(style="condor")
         )
         self.sc.add_sites(local, exec_site)
@@ -212,11 +259,24 @@ class CperSoilMoistureWorkflow:
         self.tc = TransformationCatalog()
         container = None
         if use_container:
+            # A bare name means Docker Hub. A full URL is passed through, so a
+            # SIF built elsewhere can be used directly — the way out when the
+            # staging site has no apptainer to convert docker:// itself, or
+            # when you do not want every run re-pulling from a registry.
+            if "://" in container_image:
+                image_url = container_image
+                image_site = {"http": "web", "https": "web",
+                              "file": "local"}.get(
+                                  container_image.split("://", 1)[0],
+                                  "docker_hub")
+            else:
+                image_url = "docker://" + container_image
+                image_site = "docker_hub"
             container = Container(
                 "cper_soilmoisture_container",
                 container_type=Container.SINGULARITY,
-                image=f"docker://{container_image}",
-                image_site="docker_hub",
+                image=image_url,
+                image_site=image_site,
             )
             self.tc.add_containers(container)
         else:
@@ -748,7 +808,7 @@ def main():
                         help="Site/station configuration JSON")
     parser.add_argument("--mode", default="all", choices=list(MODES),
                         help="How much of the pipeline to build. Default 'all' "
-                             "runs M1-M4 and ends in the gridded dynamic map; "
+                             "runs everything and ends in the gridded map; "
                              "the others scale back (SPEC.md section 7). "
                              "'nowcast' is 'all' on a short window, meant to "
                              "be paired with --reuse-dir; 'fetch' downloads "
@@ -768,6 +828,33 @@ def main():
                         help="Docker container image for workflow jobs "
                              "(:m3 adds scikit-learn/matplotlib; SPEC.md "
                              "'Container': new tag, don't mutate :latest)")
+    parser.add_argument("--exec-universe", default=None,
+                        choices=["vanilla", "container"],
+                        help="HTCondor universe for the execution site. "
+                             "Default 'container': HTCondor starts the "
+                             "container and PegasusLite runs inside it, which "
+                             "is what Pegasus recommends for every HTCondor "
+                             "pool and the only thing that works where the "
+                             "execution point is itself an unprivileged "
+                             "container (OSG / OSPool / PATh, i.e. ACCESS "
+                             "Pegasus) — there, a nested apptainer dies with "
+                             "'Failed to set mount propagation: Permission "
+                             "denied'. 'vanilla' has PegasusLite launch "
+                             "apptainer itself; use it if the pool's HTCondor "
+                             "is too old for container universe. Implied by "
+                             "--no-container.")
+    parser.add_argument("--no-sites-catalog", action="store_true",
+                        help="Do not write sites.yml; plan against the site "
+                             "catalog the submit host already provides (ACCESS "
+                             "Pegasus points at one from ~/.pegasusrc via "
+                             "pegasus.catalog.site.repo.file). Pair it with "
+                             "--inherit-pegasusrc and pass that platform's own "
+                             "site name to -e.")
+    parser.add_argument("--inherit-pegasusrc", action="store_true",
+                        help="Seed the generated pegasus.properties from "
+                             "~/.pegasusrc before adding ours. Without this, "
+                             "the generated file SHADOWS ~/.pegasusrc entirely "
+                             "— pegasus-plan reads one or the other, not both.")
     parser.add_argument("--no-container", action="store_true",
                         help="Run jobs in the execution site's native "
                              "environment instead of the container. Use when "
@@ -827,6 +914,23 @@ def main():
             logger.error("No usable sources selected")
             sys.exit(1)
 
+    # --exec-universe defaults to 'container' (see the flag's help), but there
+    # is nothing for that universe to start when --no-container removed the
+    # container, so that flag falls back to vanilla rather than erroring.
+    if args.no_container:
+        if args.exec_universe == "container":
+            logger.error("--exec-universe container and --no-container "
+                         "contradict each other: the container universe exists "
+                         "to run the container. Pick one.")
+            sys.exit(1)
+        args.exec_universe = "vanilla"
+    elif args.exec_universe is None:
+        args.exec_universe = "container"
+    if args.exec_universe == "container" and args.no_sites_catalog:
+        logger.warning("--exec-universe container has no effect together with "
+                       "--no-sites-catalog: the universe is a site-catalog "
+                       "profile, so the submit host's own catalog decides.")
+
     if not os.path.exists(args.config):
         logger.error("Config file not found: %s", args.config)
         sys.exit(1)
@@ -836,8 +940,15 @@ def main():
     try:
         wf = CperSoilMoistureWorkflow(dagfile=args.output,
                                       reuse_dir=args.reuse_dir)
-        wf.create_pegasus_properties()
-        wf.create_sites_catalog(exec_site_name=args.execution_site_name)
+        wf.create_pegasus_properties(
+            inherit_pegasusrc=args.inherit_pegasusrc)
+        if args.no_sites_catalog:
+            logger.info("Not writing sites.yml: planning will use the submit "
+                        "host's own site catalog. Site '%s' must exist there.",
+                        args.execution_site_name)
+        else:
+            wf.create_sites_catalog(exec_site_name=args.execution_site_name,
+                                    universe=args.exec_universe)
         wf.create_replica_catalog()
         wf.create_transformation_catalog(
             exec_site_name=args.execution_site_name,
@@ -852,8 +963,15 @@ def main():
         logger.info("=" * 70)
         logger.info("  Workflow file: %s", args.output)
         logger.info("  Mode: %s (%s)", args.mode,
-                    ", ".join(sorted(MODE_BRANCHES[args.mode])))
+                    ", ".join(BRANCH_LABELS.get(b, b)
+                              for b in sorted(MODE_BRANCHES[args.mode])))
         logger.info("  Sources: %s", ", ".join(args.sources))
+        logger.info("  Execution: site %s, %s", args.execution_site_name,
+                    "site catalog from the submit host"
+                    if args.no_sites_catalog
+                    else "%s universe, container %s" % (
+                        args.exec_universe,
+                        "disabled" if args.no_container else args.container_image))
         logger.info("  Jobs: %d", len(wf.wf.jobs))
         summary = wf.reuse_summary()
         if summary:

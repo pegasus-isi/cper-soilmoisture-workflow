@@ -170,7 +170,9 @@ Pegasus prunes the job that would have produced it — so the run starts at
 `harmonize` instead of re-downloading. Results stage back into `output/`.
 
 Measured end to end on the Chameleon pool; every row was submitted and ran to
-completion:
+completion. These runs predate the switch to container universe, so the job
+counts hold but the wall clocks may shift a little with how the image is
+delivered:
 
 | | executable jobs | wall clock |
 |---|---|---|
@@ -326,9 +328,44 @@ The other modes exist to do *less*:
 --config PATH                          default: site_config.json
 -e / --execution-site-name NAME        default: condorpool
 --container-image IMAGE                default: pegasus/cper-soilmoisture:m3
+                                       a bare name means Docker Hub; a full
+                                       URL (https:// or file:// to a SIF) is
+                                       used as-is
 --no-container                         run in the site's native environment
+--exec-universe {container,vanilla}    default: container
+--no-sites-catalog                     plan against the submit host's catalog
+--inherit-pegasusrc                    layer our properties onto ~/.pegasusrc
 -o / --output FILE                     default: workflow.yml
 ```
+
+### Which HTCondor universe
+
+Jobs run in **container universe** by default: HTCondor creates the container
+and PegasusLite runs inside it, with the image staged in as a data dependency.
+Pegasus recommends this for every HTCondor pool, and it is the only thing that
+works where the execution point is *itself* an unprivileged container — OSG /
+OSPool / PATh, which is what **ACCESS Pegasus** provisions. There, the older
+arrangement fails before the task starts:
+
+```
+Using /usr/bin/apptainer to run the container
+ERROR  : Failed to set mount propagation: Permission denied
+```
+
+That is a nested unprivileged apptainer, not a workflow bug — and note that a
+Pegasus example running fine on the same pool (the ACCESS Quickstart, say)
+proves nothing, because it declares no container at all.
+
+Use `--exec-universe vanilla` to go back to PegasusLite launching apptainer
+itself, if a pool's HTCondor predates container universe.
+
+On a managed submit host like ACCESS Pegasus, two more flags matter:
+`--no-sites-catalog` plans against the platform's own site catalog
+(`pegasus.catalog.site.repo.file` in `~/.pegasusrc`) instead of the one we
+write — pass its site name to `-e` — and `--inherit-pegasusrc` layers our
+properties onto `~/.pegasusrc`, without which the generated
+`pegasus.properties` shadows the platform's settings entirely, since
+`pegasus-plan` reads one file or the other and never both.
 
 Explicit `--start-date/--end-date` win over the config windows. Each fetch job
 carries a DAGMan retry of 2 for transient API failures.
