@@ -123,10 +123,14 @@ docker run --rm --platform linux/amd64 pegasus/cper-soilmoisture:m3 \
 ./fetch_data.sh
 ```
 
-Downloads every input once into `output/` — 121 NEON site-months plus USCRN,
+Downloads every input once into `inputs/` — 121 NEON site-months plus USCRN,
 SCAN, the DEM, POLARIS and SSURGO. Measured: **126 files, 58 MB, 4 min 23 s**
 with the default 6 workers. It is idempotent: re-running skips whatever is
 already there, so an interrupted fetch resumes where it stopped.
+
+Downloads land in `inputs/` and results in `output/` on purpose. Feeding the
+run `--reuse-dir inputs` reuses only the downloads, so the analysis recomputes
+in full every time you re-run it — which is what you want while iterating.
 
 The script does not hardcode the work. It asks `workflow_generator.py` for the
 download-only DAG and executes exactly the jobs that DAG contains, so adding a
@@ -155,19 +159,32 @@ pegasus-plan --submit -s condorpool -o local fetch.yml
 It is **not faster** — measured 7 m 18 s against the script's 4 m 23 s, because
 167 jobs each pay scheduling and stage-out overhead that dwarfs a ~2 s
 download. Use the script unless you specifically want the DAG's provenance
-record; both leave `output/` in the same state.
+record; both leave `inputs/` in the same state.
 
 ## 4. Run the workflow
 
 ```sh
-python3 workflow_generator.py --reuse-dir output -o workflow.yml
+python3 workflow_generator.py --reuse-dir inputs -o workflow.yml
 pegasus-plan --submit -s condorpool -o local workflow.yml
 pegasus-status <submit-dir>
 ```
 
-`--reuse-dir` registers everything already in `output/` as a replica, and
+`--reuse-dir` registers everything already in that directory as a replica, and
 Pegasus prunes the job that would have produced it — so the run starts at
-`harmonize` instead of re-downloading. Results stage back into `output/`.
+`harmonize` instead of re-downloading. Results stage into `output/`.
+
+**Which directory you point it at decides what gets recomputed**, and this is
+the whole trick:
+
+| `--reuse-dir` | Reuses | Use it when |
+|---|---|---|
+| `inputs` | downloads only | re-running the analysis, however many times — every stage after `harmonize` recomputes |
+| `output` (products from a previous run) | downloads *and* computed products | a nowcast, where reusing the covariates, zones and fingerprints is the point |
+
+⚠ A full run against a directory of computed products prunes almost everything
+and finishes in a few minutes having recomputed nothing. That looks like a fast
+success and proves nothing — if you meant to re-run the analysis, point at
+`inputs`.
 
 Measured end to end on the Chameleon pool; every row was submitted and ran to
 completion. These runs predate the switch to container universe, so the job
@@ -179,8 +196,8 @@ delivered:
 | No prefetch, everything from scratch | 186 | 9 m 56 s |
 | `./fetch_data.sh` (the prefetch) | — | 4 m 23 s |
 | `--mode fetch` DAG instead of the script | 167 | 7 m 18 s |
-| Run after prefetching | **45** | **6 m 1 s** |
-| Re-run against a complete previous run | **16** | 4 m 2 s |
+| Run after prefetching (`--reuse-dir inputs`) | **45** | **6 m 1 s** |
+| Re-run against a directory of computed products | **16** | 4 m 2 s |
 
 The prefetched run produces **bit-identical** products: `zones.tif` and
 `soil_moisture_now.tif` match pixel for pixel (0 of 1,471,599 differing), and
@@ -195,9 +212,10 @@ genuine one-shot.
 
 ### Keeping the map current
 
-Re-run with a short window and the same reuse directory. The static products
-(covariates, zones) and the fingerprints are reused, so only the recent
-observations and the estimate are recomputed:
+Re-run with a short window, this time reusing a **previous run's products** —
+that is what makes it cheap. The static products (covariates, zones) and the
+fingerprints are reused, so only the recent observations and the estimate are
+recomputed:
 
 ```sh
 python3 workflow_generator.py --mode nowcast --reuse-dir output -o nowcast.yml
@@ -543,7 +561,7 @@ publication lag, which drifts.
 
 ```
 workflow_generator.py    Pegasus DAG generator (--mode all by default)
-fetch_data.sh            Download every input once into output/
+fetch_data.sh            Download every input once into inputs/
 example_usage.sh         Minimal no-Pegasus smoke test
 site_config.json         Stations, per-source config, analysis grid + parameters
 bin/

@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 #
-# fetch_data.sh — download every workflow input once, into output/.
+# fetch_data.sh — download every workflow input once, into inputs/.
 #
 # Run this before the workflow. Afterwards, point a run at the directory:
 #
 #     ./fetch_data.sh
-#     python3 workflow_generator.py --reuse-dir output -o workflow.yml
+#     python3 workflow_generator.py --reuse-dir inputs -o workflow.yml
 #     pegasus-plan --submit -s condorpool -o local workflow.yml
 #
 # Pegasus registers everything it finds in --reuse-dir as a replica and prunes
 # the job that would have produced it, so the run starts at `harmonize` instead
 # of re-downloading 121 NEON site-months.
+#
+# Downloads go to inputs/ and results to output/ deliberately: the analysis is
+# then re-runnable any number of times against the same downloads, because
+# --reuse-dir inputs holds nothing the analysis produces. Point --reuse-dir at
+# a directory containing computed products and Pegasus prunes those jobs too,
+# so the "run" finishes in seconds having recomputed nothing.
 #
 # The work is not hardcoded here: the script asks workflow_generator.py for the
 # download-only DAG and then executes exactly the jobs that DAG contains. Add a
@@ -26,12 +32,13 @@
 #     ./fetch_data.sh --jobs 12             # more concurrency
 #     ./fetch_data.sh --start-date 2024-01-01 --end-date 2024-06-30
 #     ./fetch_data.sh --sources awdb        # skip NEON/USCRN
+#     ./fetch_data.sh --output-dir /data/cper   # somewhere else entirely
 #
 set -euo pipefail
 cd "$(dirname "$0")"
 
 JOBS=6
-OUT=output
+OUT=inputs
 IMAGE=pegasus/cper-soilmoisture:m3
 RUNNER=auto
 GEN_ARGS=()
@@ -43,7 +50,7 @@ while [ $# -gt 0 ]; do
         --container) RUNNER=container; shift ;;
         --no-container) RUNNER=local; shift ;;
         --container-image) IMAGE=$2; RUNNER=container; shift 2 ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
         *)        GEN_ARGS+=("$1"); shift ;;
     esac
 done
@@ -109,7 +116,8 @@ DAG=$(mktemp -t fetch_dag.XXXXXX.yml)
 trap 'rm -f "$DAG"' EXIT
 
 echo "==> Working out what needs downloading"
-python3 workflow_generator.py --mode fetch -o "$DAG" "${GEN_ARGS[@]}" 2>&1 \
+python3 workflow_generator.py --mode fetch --output-dir "$OUT" \
+    -o "$DAG" "${GEN_ARGS[@]}" 2>&1 \
     | grep -E "Fetch window|fan-out|Jobs:|WARNING|ERROR" || true
 
 echo

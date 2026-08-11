@@ -6,6 +6,7 @@ __pycache__/
 
 # Pegasus run artifacts
 scratch/
+inputs/
 output/
 output.tgz
 cc/

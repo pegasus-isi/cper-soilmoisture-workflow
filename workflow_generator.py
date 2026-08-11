@@ -145,11 +145,18 @@ class CperSoilMoistureWorkflow:
     wf = sc = tc = rc = props = None
     wf_name = "cper-soilmoisture"
 
-    def __init__(self, dagfile="workflow.yml", reuse_dir=None):
+    def __init__(self, dagfile="workflow.yml", reuse_dir=None, output_dir=None):
         self.dagfile = dagfile
         self.wf_dir = str(Path(__file__).parent.resolve())
         self.shared_scratch_dir = os.path.join(self.wf_dir, "scratch")
-        self.local_storage_dir = os.path.join(self.wf_dir, "output")
+        # Where stage-out lands. Keeping downloads (--mode fetch --output-dir
+        # inputs) apart from results (output/) is what makes the analysis
+        # re-runnable: --reuse-dir inputs then reuses only the *inputs*, so
+        # every stage after harmonize recomputes. Point --reuse-dir at a
+        # directory that also holds computed products and Pegasus prunes those
+        # too, leaving a run that finishes in seconds and proves nothing.
+        self.local_storage_dir = (os.path.abspath(output_dir) if output_dir
+                                  else os.path.join(self.wf_dir, "output"))
         # Directory of already-downloaded/­computed products to reuse. Every
         # declared output that is found there is registered as a replica, and
         # Pegasus workflow reduction then prunes the job that would have
@@ -862,6 +869,14 @@ def main():
                              "unprivileged Kubernetes pod failing with "
                              "'Failed to set mount propagation'). The site "
                              "must then already provide the Python deps.")
+    parser.add_argument("--output-dir", metavar="DIR",
+                        help="Where stage-out lands (default ./output). Give "
+                             "a --mode fetch run its own directory — "
+                             "'--mode fetch --output-dir inputs' — and then "
+                             "'--reuse-dir inputs' reuses the downloads while "
+                             "recomputing everything else, however many times "
+                             "you re-run. Reusing a directory that also holds "
+                             "computed products prunes those as well.")
     parser.add_argument("--reuse-dir", metavar="DIR",
                         help="Directory of already-fetched/computed products "
                              "(e.g. the output/ directory of a --mode fetch "
@@ -939,7 +954,8 @@ def main():
 
     try:
         wf = CperSoilMoistureWorkflow(dagfile=args.output,
-                                      reuse_dir=args.reuse_dir)
+                                      reuse_dir=args.reuse_dir,
+                                      output_dir=args.output_dir)
         wf.create_pegasus_properties(
             inherit_pegasusrc=args.inherit_pegasusrc)
         if args.no_sites_catalog:
@@ -966,6 +982,7 @@ def main():
                     ", ".join(BRANCH_LABELS.get(b, b)
                               for b in sorted(MODE_BRANCHES[args.mode])))
         logger.info("  Sources: %s", ", ".join(args.sources))
+        logger.info("  Outputs: %s", wf.local_storage_dir)
         logger.info("  Execution: site %s, %s", args.execution_site_name,
                     "site catalog from the submit host"
                     if args.no_sites_catalog
