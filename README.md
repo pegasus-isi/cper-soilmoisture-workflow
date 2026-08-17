@@ -103,8 +103,36 @@ a local file.
 
 **Apptainer cannot build on macOS**, and unlike a Docker tag a `.sif` has no
 multi-arch manifest — one file, one architecture. Build on a Linux host matching
-the pool (`ssh pegasus2`), not on Apple Silicon. See `../APPTAINER.md` for the
+the pool (`ssh pegasus2`), not on Apple Silicon. See [`APPTAINER.md`](APPTAINER.md) for the
 remote-build procedure. The legacy `Docker/Dockerfile` is kept as a fallback.
+
+<details>
+<summary>Optional: publish the image to ghcr.io</summary>
+
+Useful for sharing one build across a team or citing an immutable artifact. Needs a
+GitHub token with `write:packages`.
+
+```bash
+echo "$GHCR_TOKEN" | apptainer registry login --username <github-user> \
+    --password-stdin oras://ghcr.io
+
+TAG=$(git rev-parse --short HEAD)
+apptainer push Apptainer/CPER_SoilMoisture_Container.sif \
+    oras://ghcr.io/pegasus-isi/cper-soilmoisture-workflow:$TAG
+
+# On the submit host, pull back to the path the generator expects
+apptainer pull Apptainer/CPER_SoilMoisture_Container.sif \
+    oras://ghcr.io/pegasus-isi/cper-soilmoisture-workflow:$TAG
+```
+
+Per SPEC.md, tag a **new name per milestone** rather than reusing one.
+
+Do **not** put the `oras://` URL in the transformation catalog — Pegasus supports
+`docker://`, `shub://`, `library://`, `shifter://` and `file://`, not `oras://`.
+Treat ghcr.io as a distribution channel and keep staging the local `.sif`. Details in
+[`APPTAINER.md`](APPTAINER.md).
+
+</details>
 
 The image is lean (`python:3.11-slim` + pandas/numpy/requests/rasterio/
 scikit-learn/matplotlib). The workflow scripts are staged in by Pegasus rather
