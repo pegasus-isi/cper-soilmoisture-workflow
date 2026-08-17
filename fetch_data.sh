@@ -39,7 +39,7 @@ cd "$(dirname "$0")"
 
 JOBS=6
 OUT=inputs
-IMAGE=pegasus/cper-soilmoisture:m3
+IMAGE=Apptainer/CPER_SoilMoisture_Container.sif
 RUNNER=auto
 GEN_ARGS=()
 
@@ -54,6 +54,19 @@ while [ $# -gt 0 ]; do
         *)        GEN_ARGS+=("$1"); shift ;;
     esac
 done
+
+# Resolve IMAGE to something apptainer can exec. A path ending in .sif is a
+# locally built image used directly; anything else is a registry name and gets
+# the docker:// prefix. The .sif suffix is the discriminator because a bare
+# registry reference (pegasus/cper-soilmoisture:m3) contains a slash too.
+case "$IMAGE" in
+    *://*)  IMAGE_REF=$IMAGE ;;
+    *.sif)  case "$IMAGE" in
+                /*) IMAGE_REF=$IMAGE ;;
+                *)  IMAGE_REF=$PWD/$IMAGE ;;
+            esac ;;
+    *)      IMAGE_REF=docker://$IMAGE ;;
+esac
 
 if [ -d .venv ]; then
     # shellcheck disable=SC1091
@@ -90,11 +103,12 @@ fi
 APPTAINER=$(command -v apptainer || command -v singularity || true)
 if [ "$RUNNER" = container ]; then
     [ -n "$APPTAINER" ] || { echo "ERROR: --container asked for but no apptainer/singularity found" >&2; exit 1; }
-    echo "==> Fetchers will run in $IMAGE via $(basename "$APPTAINER")"
-    if ! "$APPTAINER" exec "docker://$IMAGE" python3 -c "$DEPS" >/dev/null 2>&1; then
-        echo "ERROR: cannot run $IMAGE (pull failed, or it lacks the deps)." >&2
-        echo "       Build and push it first - see README 'Build the container'." >&2
-        echo "       A stale ~/.docker/config.json is a common cause; see Troubleshooting." >&2
+    echo "==> Fetchers will run in $IMAGE_REF via $(basename "$APPTAINER")"
+    if ! "$APPTAINER" exec "$IMAGE_REF" python3 -c "$DEPS" >/dev/null 2>&1; then
+        echo "ERROR: cannot run $IMAGE_REF (missing, or it lacks the deps)." >&2
+        echo "       Build it first - see README 'Build the container':" >&2
+        echo "         apptainer build Apptainer/CPER_SoilMoisture_Container.sif \\" >&2
+        echo "             Apptainer/CPER_SoilMoisture_Container.def" >&2
         exit 1
     fi
 else
@@ -122,7 +136,7 @@ python3 workflow_generator.py --mode fetch --output-dir "$OUT" \
 
 echo
 echo "==> Downloading into $OUT/ with $JOBS parallel workers"
-OUT="$OUT" JOBS="$JOBS" RUNNER="$RUNNER" IMAGE="$IMAGE" APPTAINER="$APPTAINER" \
+OUT="$OUT" JOBS="$JOBS" RUNNER="$RUNNER" IMAGE_REF="$IMAGE_REF" APPTAINER="$APPTAINER" \
 python3 - "$DAG" <<'PY'
 import os, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -162,7 +176,7 @@ failed, t0 = [], time.time()
 
 
 runner = os.environ["RUNNER"]
-image, apptainer = os.environ["IMAGE"], os.environ["APPTAINER"]
+image_ref, apptainer = os.environ["IMAGE_REF"], os.environ["APPTAINER"]
 out_abs = os.path.abspath(out)
 
 
@@ -174,7 +188,7 @@ def command(path, args):
     return [apptainer, "exec",
             "--bind", "%s:%s" % (os.getcwd(), os.getcwd()),
             "--bind", "%s:%s" % (out_abs, out_abs),
-            "docker://" + image, "python3", path] + args
+            image_ref, "python3", path] + args
 
 
 def run(task):

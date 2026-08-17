@@ -1,0 +1,65 @@
+# CPER soil-moisture workflow container (M3: observations + static covariates
+# + station characterization).
+#
+# Converted from Docker/Dockerfile. M1 needed only pandas/numpy/requests; M2
+# added rasterio (whose manylinux wheel bundles GDAL/PROJ, so python:3.11-slim
+# still works — no system GDAL); M3 adds scikit-learn (behavioural clustering +
+# random-forest attribution) and matplotlib (the figure set). Terrain
+# derivatives and the recession fits stay in plain numpy (SPEC.md "Container"),
+# so scipy arrives only as an sklearn dependency and geopandas still isn't
+# needed.
+#
+# `Bootstrap: docker` pulls and converts the OCI base image directly, so no
+# Docker installation is needed to build the .sif. Per SPEC.md, build a new
+# .sif filename per milestone rather than mutating one in place.
+#
+# Build (on an x86_64 Linux host — see README):
+#   apptainer build Apptainer/CPER_SoilMoisture_Container.sif \
+#       Apptainer/CPER_SoilMoisture_Container.def
+
+Bootstrap: docker
+From: python:3.11-slim
+
+%post
+    # libexpat1 is NOT optional: rasterio's manylinux wheel bundles GDAL/PROJ
+    # but still dynamically links the system libexpat, and python:3.11-slim
+    # omits it — without this, `import rasterio` dies with
+    # "ImportError: libexpat.so.1: cannot open shared object file".
+    #
+    # curl + wget are mandatory: PegasusLite downloads its worker package
+    # inside the container before the job script ever runs.
+    apt-get update && \
+        apt-get install -y --no-install-recommends \
+            wget \
+            curl \
+            ca-certificates \
+            libexpat1
+    rm -rf /var/lib/apt/lists/*
+
+    pip install --no-cache-dir \
+        pandas \
+        numpy \
+        requests \
+        rasterio \
+        scikit-learn \
+        matplotlib
+
+    # Docker's WORKDIR /app has no Apptainer equivalent; create the directory
+    # here and let Pegasus jobs cd into their own working directory at runtime.
+    mkdir -p /app
+
+%environment
+    # Matplotlib must not try to write a font cache into a read-only or
+    # non-existent HOME on a worker node; the jobs use the Agg backend.
+    export MPLBACKEND=Agg
+    export MPLCONFIGDIR=/tmp/matplotlib
+
+    # Set Python to not buffer output (important for Pegasus log capture)
+    export PYTHONUNBUFFERED=1
+
+%runscript
+    exec /bin/bash "$@"
+
+%labels
+    maintainer Komal Thareja <kthare10@renci.org>
+    description CPER Soil Moisture workflow - observations, static covariates, station characterization
