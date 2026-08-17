@@ -456,7 +456,8 @@ instead of moving to a GDAL base. New tag per change; `:latest` is not mutated.
 GDAL/PROJ but dynamically links the system libexpat, which `python:3.11-slim`
 omits. A macOS venv uses a different wheel and will not reproduce the failure —
 verify container imports on a worker
-(`apptainer exec docker://... python3 -c "import rasterio"`). An import-time
+(`apptainer exec Apptainer/CPER_SoilMoisture_Container.sif python3 -c "import
+rasterio"`). An import-time
 crash precedes the write-empty-output handlers, so HTCondor *holds* the job on
 stage-out rather than failing it.
 

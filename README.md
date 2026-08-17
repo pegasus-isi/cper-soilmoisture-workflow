@@ -86,25 +86,59 @@ USCRN only.
 
 ## 2. Build the container
 
-Every workflow job runs inside `pegasus/cper-soilmoisture`, pulled from Docker
-Hub and converted to Singularity/Apptainer.
+Every workflow job runs inside a locally built Apptainer image. Pegasus stages
+the `.sif` like any other input file, so there is no registry push and no Docker
+Hub login.
 
 ```sh
-docker build -t pegasus/cper-soilmoisture:m3 Docker/
-docker push pegasus/cper-soilmoisture:m3           # docker login first
+apptainer build Apptainer/CPER_SoilMoisture_Container.sif \
+    Apptainer/CPER_SoilMoisture_Container.def
 ```
 
-On Apple Silicon targeting an amd64 pool, build multi-arch:
+`workflow_generator.py` looks for `Apptainer/CPER_SoilMoisture_Container.sif` by
+default. `--container-image` still accepts a registry reference
+(`pegasus/cper-soilmoisture:m3`) or a full `file://`/`https://`/`docker://` URL,
+so the old Docker Hub path keeps working; anything ending in `.sif` is treated as
+a local file.
 
-```sh
-docker buildx build --platform linux/amd64,linux/arm64 \
-    -t pegasus/cper-soilmoisture:m3 --push Docker/
+**Apptainer cannot build on macOS**, and unlike a Docker tag a `.sif` has no
+multi-arch manifest — one file, one architecture. Build on a Linux host matching
+the pool (`ssh pegasus2`), not on Apple Silicon. See [`APPTAINER.md`](APPTAINER.md) for the
+remote-build procedure. The legacy `Docker/Dockerfile` is kept as a fallback.
+
+<details>
+<summary>Optional: publish the image to ghcr.io</summary>
+
+Useful for sharing one build across a team or citing an immutable artifact. Needs a
+GitHub token with `write:packages`.
+
+```bash
+echo "$GHCR_TOKEN" | apptainer registry login --username <github-user> \
+    --password-stdin oras://ghcr.io
+
+TAG=$(git rev-parse --short HEAD)
+apptainer push Apptainer/CPER_SoilMoisture_Container.sif \
+    oras://ghcr.io/pegasus-isi/cper-soilmoisture-workflow:$TAG
+
+# On the submit host, pull back to the path the generator expects
+apptainer pull Apptainer/CPER_SoilMoisture_Container.sif \
+    oras://ghcr.io/pegasus-isi/cper-soilmoisture-workflow:$TAG
 ```
+
+Per SPEC.md, tag a **new name per milestone** rather than reusing one.
+
+Do **not** put the `oras://` URL in the transformation catalog — Pegasus supports
+`docker://`, `shub://`, `library://`, `shifter://` and `file://`, not `oras://`.
+Treat ghcr.io as a distribution channel and keep staging the local `.sif`. Details in
+[`APPTAINER.md`](APPTAINER.md).
+
+</details>
 
 The image is lean (`python:3.11-slim` + pandas/numpy/requests/rasterio/
 scikit-learn/matplotlib). The workflow scripts are staged in by Pegasus rather
 than baked in, so it only needs rebuilding when job *dependencies* change — and
-each dependency change gets a **new tag** rather than mutating an existing one.
+each dependency change gets a **new filename** rather than mutating an existing
+one (SPEC.md "Container").
 
 ⚠ **Verify the imports in the container, not just your venv.** rasterio's
 manylinux wheel needs the system `libexpat1`, which `python:3.11-slim` omits — a
@@ -113,7 +147,7 @@ import-time crash happens before the scripts can write their declared outputs,
 so HTCondor *holds* the jobs on stage-out instead of failing them:
 
 ```sh
-docker run --rm --platform linux/amd64 pegasus/cper-soilmoisture:m3 \
+apptainer exec Apptainer/CPER_SoilMoisture_Container.sif \
     python3 -c "import rasterio, sklearn, matplotlib, pandas"
 ```
 

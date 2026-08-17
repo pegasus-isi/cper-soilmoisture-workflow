@@ -329,16 +329,37 @@ class CperSoilMoistureWorkflow:
         self.tc = TransformationCatalog()
         container = None
         if use_container:
-            # A bare name means Docker Hub. A full URL is passed through, so a
-            # SIF built elsewhere can be used directly — the way out when the
-            # staging site has no apptainer to convert docker:// itself, or
-            # when you do not want every run re-pulling from a registry.
+            # Three accepted forms, in precedence order:
+            #   1. A full URL is passed through unchanged (file://, https://,
+            #      docker://) — the way out when the staging site has no
+            #      apptainer to convert docker:// itself.
+            #   2. A path ending in .sif (the default) is a locally built
+            #      Apptainer image; Pegasus stages it like any other input, so
+            #      image_site is "local", the site where the file physically
+            #      lives. Relative paths resolve against the workflow directory.
+            #      The .sif suffix is the discriminator on purpose — a bare
+            #      registry reference like "pegasus/cper-soilmoisture:m3" also
+            #      contains a slash, so testing for a path separator here would
+            #      misread every Docker Hub name as a local file.
+            #   3. A bare image name still means Docker Hub, for the registry
+            #      workflow that predates the Apptainer switch.
             if "://" in container_image:
                 image_url = container_image
                 image_site = {"http": "web", "https": "web",
                               "file": "local"}.get(
                                   container_image.split("://", 1)[0],
                                   "docker_hub")
+            elif container_image.endswith(".sif"):
+                sif_path = container_image if os.path.isabs(container_image) \
+                    else os.path.join(self.wf_dir, container_image)
+                if not os.path.exists(sif_path):
+                    logger.warning(
+                        "Apptainer image not found at %s — build it first "
+                        "with: apptainer build %s "
+                        "Apptainer/CPER_SoilMoisture_Container.def",
+                        sif_path, sif_path)
+                image_url = "file://" + sif_path
+                image_site = "local"
             else:
                 image_url = "docker://" + container_image
                 image_site = "docker_hub"
@@ -894,10 +915,13 @@ def _build_parser():
     parser.add_argument("-e", "--execution-site-name", default="condorpool",
                         help="HTCondor pool name for execution")
     parser.add_argument("--container-image",
-                        default="pegasus/cper-soilmoisture:m3",
-                        help="Docker container image for workflow jobs "
-                             "(:m3 adds scikit-learn/matplotlib; SPEC.md "
-                             "'Container': new tag, don't mutate :latest)")
+                        default="Apptainer/CPER_SoilMoisture_Container.sif",
+                        help="Container for workflow jobs: a path to a locally "
+                             "built Apptainer .sif (default, relative to the "
+                             "workflow directory), a full file://|https://|"
+                             "docker:// URL, or a bare Docker Hub image name. "
+                             "SPEC.md 'Container': new filename per milestone, "
+                             "don't mutate one in place")
     parser.add_argument("--exec-universe", default=None,
                         choices=["vanilla", "container"],
                         help="HTCondor universe for the execution site. "
