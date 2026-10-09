@@ -71,6 +71,19 @@ from pathlib import Path
 
 from Pegasus.api import *
 
+# Site-catalog handling. Keeps this generator free of scheduler details.
+sys.path.insert(0, str(Path(__file__).parent.resolve()))
+from custom_sites import (  # noqa: E402
+    HOSTED_SITE, STYLES, ensure_sites_yml, hosted_catalog, is_batch_site, parse_profile,
+    parse_tag_profile, worker_package_url,
+)
+
+# The container's OS, for the Pegasus worker package staged into it. Must
+# match the image's base (Apptainer/CPER_SoilMoisture_Container.def:
+# python:3.11-slim), not the submit host. That unsuffixed tag follows
+# Debian's current release, Debian 13 (trixie).
+CONTAINER_PLATFORM = "x86_64_deb_13"
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -131,19 +144,22 @@ def response_metrics():
 # best-effort — it writes its declared output, logs an ERROR, and exits 0 on
 # persistent failure, leaving harmonize to fail only if every source is empty.
 FETCHERS = {
-    # source: (transformation, script, memory)
-    "uscrn": ("fetch_uscrn_data", "bin/fetch_uscrn_data.py", "1 GB"),
-    "awdb": ("fetch_awdb_data", "bin/fetch_awdb_data.py", "1 GB"),
-    "neon": ("fetch_neon_data", "bin/fetch_neon_data.py", "2 GB"),
-    "sage": ("fetch_sage_data", "bin/fetch_sage_data.py", "1 GB"),
+    # source: (transformation, script, memory, runtime in seconds)
+    "uscrn": ("fetch_uscrn_data", "bin/fetch_uscrn_data.py", "1 GB", 3600),
+    "awdb": ("fetch_awdb_data", "bin/fetch_awdb_data.py", "1 GB", 3600),
+    "neon": ("fetch_neon_data", "bin/fetch_neon_data.py", "2 GB", 3600),
+    "sage": ("fetch_sage_data", "bin/fetch_sage_data.py", "1 GB", 3600),
 }
 
 
 class CperSoilMoistureWorkflow:
     """Generate the Pegasus workflow for CPER soil-moisture mapping."""
 
-    wf = sc = tc = rc = props = None
+    wf = tc = rc = props = None
     wf_name = "cper-soilmoisture"
+    # Set by build_workflow() from the site in use.
+    worker_package_url = None
+    bind_workflow_dir = False
 
     def __init__(self, dagfile="workflow.yml", reuse_dir=None, output_dir=None):
         self.dagfile = dagfile
@@ -164,13 +180,11 @@ class CperSoilMoistureWorkflow:
         self.reuse_dir = os.path.abspath(reuse_dir) if reuse_dir else None
         self.reused = []
         self.produced = []
-        # Set by create_sites_catalog / create_workflow; plan_submit() defaults
-        # to it so a caller never has to repeat the site name.
-        self.exec_site_name = "condorpool"
+        # Set by build_workflow(); plan_submit() defaults to it so a caller
+        # never has to repeat the site name.
+        self.exec_site_name = HOSTED_SITE
 
     def write(self):
-        if self.sc is not None:
-            self.sc.write()
         self.props.write()
         self.rc.write()
         self.tc.write()
@@ -235,7 +249,10 @@ class CperSoilMoistureWorkflow:
             print(exc)
         return self
 
-    def create_pegasus_properties(self, inherit_pegasusrc=False):
+    def create_pegasus_properties(self, inherit_pegasusrc=False,
+                                  sites_yml="sites.yml",
+                                  bypass_input_staging=False,
+                                  hosted_site_catalog=None):
         self.props = Properties()
         # pegasus-plan reads ./pegasus.properties INSTEAD of ~/.pegasusrc, so on
         # a managed submit host (ACCESS Pegasus writes its site catalog pointer,
@@ -258,37 +275,32 @@ class CperSoilMoistureWorkflow:
                 logger.warning("--inherit-pegasusrc: no %s to inherit from",
                                rc_path)
         self.props["pegasus.transfer.threads"] = "16"
-
-    def create_sites_catalog(self, exec_site_name="condorpool",
-                             universe="container"):
-        logger.info("Creating site catalog for execution site: %s (%s universe)",
-                    exec_site_name, universe)
-        self.exec_site_name = exec_site_name
-        self.sc = SiteCatalog()
-        local = Site("local").add_directories(
-            Directory(Directory.SHARED_SCRATCH, self.shared_scratch_dir).add_file_servers(
-                FileServer("file://" + self.shared_scratch_dir, Operation.ALL)
-            ),
-            Directory(Directory.LOCAL_STORAGE, self.local_storage_dir).add_file_servers(
-                FileServer("file://" + self.local_storage_dir, Operation.ALL)
-            ),
-        )
-        # universe="container" (the default) hands the container to HTCondor
-        # instead of having PegasusLite run apptainer itself; Pegasus stages the
-        # image in as a data dependency and HTCondor's file transfer moves it to
-        # the worker. Pegasus recommends it for every HTCondor pool, and it is
-        # the *only* thing that works where the execution point is already an
-        # unprivileged container (OSG / OSPool / PATh, which is what ACCESS
-        # Pegasus provisions): a nested unprivileged apptainer cannot set up its
-        # mount namespace and dies with "Failed to set mount propagation:
-        # Permission denied" before the task starts. universe="vanilla" is the
-        # fallback for a pool whose HTCondor predates container universe.
-        exec_site = (
-            Site(exec_site_name)
-            .add_condor_profile(universe=universe)
-            .add_pegasus_profile(style="condor")
-        )
-        self.sc.add_sites(local, exec_site)
+        if hosted_site_catalog:
+            # A centrally hosted site catalog (pegasushub
+            # pegasus-site-catalogs) defines the execution site; pegasus-plan
+            # downloads and caches it, and merges sites.yml over it.
+            self.props["pegasus.catalog.site.repo.file"] = hosted_site_catalog
+        # Symlink rather than copy when an input already sits on the
+        # execution site. A no-op otherwise, so always on.
+        self.props["pegasus.transfer.links"] = "true"
+        if bypass_input_staging:
+            # Jobs read inputs (notably the .sif) straight from the submit
+            # host's paths. Only valid where workers share a filesystem with
+            # the submit host (a Slurm cluster) — never on a condor pool
+            # staging over HTCondor file transfer.
+            self.props["pegasus.transfer.bypass.input.staging"] = "true"
+        if self.worker_package_url:
+            # Stage the container-compatible worker package named in the TC
+            # (pegasus::worker) and never download one from inside a job:
+            # the image may lack curl/wget, workers may lack internet, and the
+            # submit host's kickstart may need a newer glibc than the image.
+            self.props["pegasus.transfer.worker.package"] = "true"
+            self.props["pegasus.transfer.worker.package.strict"] = "false"
+            self.props["pegasus.transfer.worker.package.autodownload"] = "false"
+        if os.path.isfile(sites_yml):
+            # Lets pegasus-plan find sites.yml from any directory.
+            self.props["pegasus.catalog.site"] = "YAML"
+            self.props["pegasus.catalog.site.file"] = os.path.abspath(sites_yml)
 
     def create_replica_catalog(self):
         logger.info("Creating replica catalog")
@@ -323,8 +335,13 @@ class CperSoilMoistureWorkflow:
                 "n_total_outputs": len(self.produced),
                 "missing": missing}
 
-    def create_transformation_catalog(self, exec_site_name, container_image,
+    def create_transformation_catalog(self, container_image,
                                       use_container=True):
+        """Containers and transformations. Nothing here names an execution
+        site: the scripts and the image live on "local" (the submit host) and
+        are shipped to wherever the job runs. Each tool states memory and a
+        wall-clock runtime (seconds) — batch sites (Slurm) refuse or kill
+        jobs without one."""
         logger.info("Creating transformation catalog")
         self.tc = TransformationCatalog()
         container = None
@@ -369,6 +386,15 @@ class CperSoilMoistureWorkflow:
                 image=image_url,
                 image_site=image_site,
             )
+            if self.bind_workflow_dir:
+                # Batch sites stage inputs as symlinks into the workflow
+                # directory, and PegasusLite starts containers with
+                # --no-home, so without this bind every job fails with
+                # kickstart "Unable to execute the specified binary" (exit
+                # 127). Never on a condor pool: the directory does not exist
+                # on its workers.
+                container.add_pegasus_profile(
+                    container_arguments=f"--bind {self.wf_dir}")
             self.tc.add_containers(container)
         else:
             # Some execution endpoints cannot run Apptainer at all - notably
@@ -385,22 +411,22 @@ class CperSoilMoistureWorkflow:
             )
 
         specs = [FETCHERS[s] for s in ALL_SOURCES] + [
-            ("harmonize", "bin/harmonize.py", "2 GB"),
-            ("soil_moisture_map", "bin/soil_moisture_map.py", "2 GB"),
+            ("harmonize", "bin/harmonize.py", "2 GB", 1800),
+            ("soil_moisture_map", "bin/soil_moisture_map.py", "2 GB", 1800),
             # M2 static branch
-            ("fetch_soil_properties", "bin/fetch_soil_properties.py", "2 GB"),
-            ("fetch_terrain", "bin/fetch_terrain.py", "2 GB"),
-            ("build_covariates", "bin/build_covariates.py", "4 GB"),
+            ("fetch_soil_properties", "bin/fetch_soil_properties.py", "2 GB", 3600),
+            ("fetch_terrain", "bin/fetch_terrain.py", "2 GB", 3600),
+            ("build_covariates", "bin/build_covariates.py", "4 GB", 3600),
             # M3 characterization branch
-            ("station_response", "bin/station_response.py", "2 GB"),
+            ("station_response", "bin/station_response.py", "2 GB", 1800),
             # All three station_similarity stages (cluster / attribute / merge)
             # peak at 0.17 GB measured. They used to ask for 2 GB, and with a
             # 9-way attribution fan-out that over-request became the binding
             # constraint on a 7.9 GB worker: it kept delineate_zones (4 GB) out
             # of a slot until the whole fan-out drained, cancelling the point of
             # taking attribution off the critical path.
-            ("station_similarity", "bin/station_similarity.py", "1 GB"),
-            ("visualize_response", "bin/visualize_response.py", "2 GB"),
+            ("station_similarity", "bin/station_similarity.py", "1 GB", 1800),
+            ("visualize_response", "bin/visualize_response.py", "2 GB", 1800),
             # M3 zone delineation + M4 dynamic map. These hold the whole
             # 49-band stack in memory at once (1017 x 1447 float32 ~ 290 MB)
             # plus float64 clustering workspaces. Requests are ~2x the
@@ -409,20 +435,32 @@ class CperSoilMoistureWorkflow:
             # A 8 GB ask sat Idle forever on 7.75 GB workers and stalled the
             # DAG with no error anywhere — check `condor_q -better-analyze`
             # before raising these.
-            ("delineate_zones", "bin/delineate_zones.py", "4 GB"),
-            ("estimate_soil_moisture", "bin/estimate_soil_moisture.py", "4 GB"),
-            ("visualize_soil_moisture", "bin/visualize_soil_moisture.py", "2 GB"),
+            ("delineate_zones", "bin/delineate_zones.py", "4 GB", 3600),
+            ("estimate_soil_moisture", "bin/estimate_soil_moisture.py", "4 GB", 3600),
+            ("visualize_soil_moisture", "bin/visualize_soil_moisture.py", "2 GB", 1800),
         ]
-        for name, rel, mem in specs:
+        for name, rel, mem, runtime in specs:
             kwargs = {"container": container} if container is not None else {}
             self.tc.add_transformations(
                 Transformation(
                     name,
-                    site=exec_site_name,
+                    site="local",
                     pfn=os.path.join(self.wf_dir, rel),
                     is_stageable=True,
                     **kwargs,
-                ).add_pegasus_profile(memory=mem)
+                ).add_pegasus_profile(memory=mem, runtime=runtime)
+            )
+        if container is not None and self.worker_package_url:
+            self.tc.add_transformations(
+                Transformation(
+                    "worker",
+                    namespace="pegasus",
+                    site="local",
+                    pfn=self.worker_package_url,
+                    is_stageable=True,
+                    arch=Arch.X86_64,
+                    os_type=OS.LINUX,
+                )
             )
 
     @staticmethod
@@ -549,7 +587,7 @@ class CperSoilMoistureWorkflow:
         dates = ["--start-date", start, "--end-date", end]
         fetch_jobs, source_obs = [], []
         for source in args.sources:
-            transformation, _, _ = FETCHERS[source]
+            transformation = FETCHERS[source][0]
 
             # NEON serves one package per site-month, so a multi-year
             # characterization window is naturally a fan-out: one job per
@@ -912,8 +950,44 @@ def _build_parser():
                              "at CPER (no public data).")
     parser.add_argument("--start-date", help="Override start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="Override end date (YYYY-MM-DD)")
-    parser.add_argument("-e", "--execution-site-name", default="condorpool",
-                        help="HTCondor pool name for execution")
+    # Site options. Every one has a default, so a run with no arguments plans
+    # on "compute": the hosted catalog's site when one is named (-s or
+    # ~/.pegasusrc), else an HTCondor pool written to sites.yml.
+    parser.add_argument("-e", "--execution-site", "--execution-site-name",
+                        dest="execution_site", default=HOSTED_SITE,
+                        help=f"Site to plan against (default: {HOSTED_SITE!r}, "
+                             "the name hosted catalogs give their site)")
+    parser.add_argument("-s", "--hosted-site-catalog", metavar="FILE",
+                        help="Centrally hosted site catalog to plan against, "
+                             "e.g. unity.yml (github.com/pegasushub/"
+                             "pegasus-site-catalogs); written to "
+                             "pegasus.properties. Default: the one named in "
+                             "~/.pegasusrc, if any.")
+    parser.add_argument("--site-style", choices=("auto",) + STYLES + ("none",),
+                        default="auto",
+                        help="auto (default): keep a sites.yml entry or hosted "
+                             "catalog if one exists, else add an HTCondor "
+                             "site. condor/slurm: (re)write this site's entry. "
+                             "none: leave sites.yml alone.")
+    parser.add_argument("--queue", metavar="PARTITION",
+                        help="Batch partition/queue jobs submit to")
+    parser.add_argument("--project", metavar="ACCOUNT",
+                        help="Allocation/account charged on a batch site")
+    parser.add_argument("--site-scratch", metavar="DIR",
+                        help="Slurm: shared scratch visible to workers and "
+                             "the submit host (default: ./work)")
+    parser.add_argument("--site-profile", action="append", default=[],
+                        type=parse_profile, metavar="NS:KEY=VALUE",
+                        help="Extra profile on the execution site; repeatable")
+    parser.add_argument("--tag-profile", action="append", default=[],
+                        type=parse_tag_profile, metavar="TAG:NS:KEY=VALUE",
+                        help="Profile for jobs carrying a tag; repeatable")
+    parser.add_argument("--shared-filesystem", choices=("auto", "yes", "no"),
+                        default="auto",
+                        help="Let jobs read inputs directly from the submit "
+                             "host. auto: on for Slurm sites, off for HTCondor.")
+    parser.add_argument("--sites-yml", metavar="FILE", default="sites.yml",
+                        help="Local site catalog (default: sites.yml)")
     parser.add_argument("--container-image",
                         default="Apptainer/CPER_SoilMoisture_Container.sif",
                         help="Container for workflow jobs: a path to a locally "
@@ -924,7 +998,8 @@ def _build_parser():
                              "don't mutate one in place")
     parser.add_argument("--exec-universe", default=None,
                         choices=["vanilla", "container"],
-                        help="HTCondor universe for the execution site. "
+                        help="HTCondor universe for an HTCondor execution "
+                             "site written to sites.yml. "
                              "Default 'container': HTCondor starts the "
                              "container and PegasusLite runs inside it, which "
                              "is what Pegasus recommends for every HTCondor "
@@ -938,8 +1013,9 @@ def _build_parser():
                              "is too old for container universe. Implied by "
                              "--no-container.")
     parser.add_argument("--no-sites-catalog", action="store_true",
-                        help="Do not write sites.yml; plan against the site "
-                             "catalog the submit host already provides (ACCESS "
+                        help="Deprecated: same as --site-style none. Do not "
+                             "touch sites.yml; plan against the site catalog "
+                             "the submit host already provides (ACCESS "
                              "Pegasus points at one from ~/.pegasusrc via "
                              "pegasus.catalog.site.repo.file). Pair it with "
                              "--inherit-pegasusrc and pass that platform's own "
@@ -1033,10 +1109,12 @@ def _resolve(args):
         args.exec_universe = "vanilla"
     elif args.exec_universe is None:
         args.exec_universe = "container"
-    if args.exec_universe == "container" and args.no_sites_catalog:
+    if args.no_sites_catalog:
+        args.site_style = "none"
+    if args.exec_universe == "container" and args.site_style == "none":
         logger.warning("--exec-universe container has no effect together with "
-                       "--no-sites-catalog: the universe is a site-catalog "
-                       "profile, so the submit host's own catalog decides.")
+                       "--site-style none: the universe is a site-catalog "
+                       "profile, so the existing catalog decides.")
 
     if not os.path.exists(args.config):
         raise ValueError("Config file not found: %s" % args.config)
@@ -1057,6 +1135,10 @@ def build_workflow(write=True, **overrides):
         fetch.plan_submit().wait()
     """
     defaults = vars(_build_parser().parse_args([]))
+    # Before the site port, -e was stored as execution_site_name; notebooks
+    # written against that keep working.
+    if "execution_site_name" in overrides:
+        overrides["execution_site"] = overrides.pop("execution_site_name")
     unknown = sorted(set(overrides) - set(defaults))
     if unknown:
         raise TypeError("unknown option(s): %s. Known: %s"
@@ -1067,18 +1149,56 @@ def build_workflow(write=True, **overrides):
     wf = CperSoilMoistureWorkflow(dagfile=args.output,
                                   reuse_dir=args.reuse_dir,
                                   output_dir=args.output_dir)
-    wf.create_pegasus_properties(inherit_pegasusrc=args.inherit_pegasusrc)
-    if args.no_sites_catalog:
-        logger.info("Not writing sites.yml: planning will use the submit "
-                    "host's own site catalog. Site '%s' must exist there.",
-                    args.execution_site_name)
-        wf.exec_site_name = args.execution_site_name
+    wf.exec_site_name = args.execution_site
+
+    # Site catalog and the settings that depend on the site. --exec-universe
+    # is how an HTCondor site runs the container: "container" (the default)
+    # hands it to HTCondor instead of having PegasusLite run apptainer itself,
+    # which Pegasus recommends for every HTCondor pool and is the only thing
+    # that works where the execution point is already an unprivileged
+    # container (OSG / OSPool / PATh, i.e. ACCESS Pegasus): a nested
+    # apptainer dies with "Failed to set mount propagation: Permission
+    # denied". It is a condor-universe profile, so it applies only when
+    # custom_sites.py writes an HTCondor entry.
+    profiles = list(args.site_profile)
+    if args.site_style in ("auto", "condor"):
+        profiles.append(("condor", "universe", args.exec_universe))
+    action, style = ensure_sites_yml(
+        args.sites_yml, args.execution_site, wf.wf_dir,
+        style=args.site_style, hosted=args.hosted_site_catalog,
+        queue=args.queue, project=args.project, scratch=args.site_scratch,
+        profiles=profiles, tag_profiles=args.tag_profile)
+    hosted = hosted_catalog(args.hosted_site_catalog)
+    logger.info("Site catalog: %s: %s%s", args.sites_yml, action,
+                " (merged over hosted %s)" % hosted if hosted else "")
+    if (style is None and hosted and args.execution_site != "local"
+            and args.execution_site != HOSTED_SITE):
+        # Nothing was written for this site, so planning works only if the
+        # hosted catalog happens to define it.
+        logger.warning(
+            "%r is not defined in %s and hosted catalogs normally define only "
+            "%r: pegasus-plan will fail unless %s has it. Use -e %s, or "
+            "--site-style condor/slurm to describe %r.",
+            args.execution_site, args.sites_yml, HOSTED_SITE, hosted,
+            HOSTED_SITE, args.execution_site)
+    if args.shared_filesystem == "auto":
+        bypass = style is not None and style != "condor"
     else:
-        wf.create_sites_catalog(exec_site_name=args.execution_site_name,
-                                universe=args.exec_universe)
+        bypass = args.shared_filesystem == "yes"
+    wf.bind_workflow_dir = bypass or is_batch_site(style,
+                                                   args.hosted_site_catalog)
+    wf.worker_package_url = worker_package_url(CONTAINER_PLATFORM)
+    if not wf.worker_package_url and not args.no_container:
+        logger.warning("pegasus-version not found: Pegasus will choose the "
+                       "container's worker package itself (needs curl/wget "
+                       "in the image and internet on the workers)")
+
+    wf.create_pegasus_properties(inherit_pegasusrc=args.inherit_pegasusrc,
+                                 sites_yml=args.sites_yml,
+                                 bypass_input_staging=bypass,
+                                 hosted_site_catalog=args.hosted_site_catalog)
     wf.create_replica_catalog()
     wf.create_transformation_catalog(
-        exec_site_name=args.execution_site_name,
         container_image=args.container_image,
         use_container=not args.no_container,
     )
@@ -1095,9 +1215,9 @@ def build_workflow(write=True, **overrides):
                           for b in sorted(MODE_BRANCHES[args.mode])))
     logger.info("  Sources: %s", ", ".join(args.sources))
     logger.info("  Outputs: %s", wf.local_storage_dir)
-    logger.info("  Execution: site %s, %s", args.execution_site_name,
-                "site catalog from the submit host"
-                if args.no_sites_catalog
+    logger.info("  Execution: site %s, %s", args.execution_site,
+                "site catalog left as is (--site-style none)"
+                if args.site_style == "none"
                 else "%s universe, container %s" % (
                     args.exec_universe,
                     "disabled" if args.no_container else args.container_image))
@@ -1134,7 +1254,7 @@ def main():
     logger.info("Next steps:")
     logger.info("  1. Review workflow: %s", args.output)
     logger.info("  2. Submit: pegasus-plan --submit -s %s -o local %s",
-                args.execution_site_name, args.output)
+                args.execution_site, args.output)
     logger.info("  3. Monitor: pegasus-status <submit_dir>")
     if args.mode == "fetch":
         logger.info("\nThis is a download-only DAG. When it finishes, run "

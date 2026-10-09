@@ -187,7 +187,7 @@ Pegasus, if you want the fetch itself tracked with provenance and retries:
 
 ```sh
 python3 workflow_generator.py --mode fetch -o fetch.yml
-pegasus-plan --submit -s condorpool -o local fetch.yml
+pegasus-plan --submit -s compute -o local fetch.yml
 ```
 
 It is **not faster** — measured 7 m 18 s against the script's 4 m 23 s, because
@@ -199,7 +199,7 @@ record; both leave `inputs/` in the same state.
 
 ```sh
 python3 workflow_generator.py --reuse-dir inputs -o workflow.yml
-pegasus-plan --submit -s condorpool -o local workflow.yml
+pegasus-plan --submit -s compute -o local workflow.yml
 pegasus-status <submit-dir>
 ```
 
@@ -277,7 +277,7 @@ recomputed:
 
 ```sh
 python3 workflow_generator.py --mode nowcast --reuse-dir output -o nowcast.yml
-pegasus-plan --submit -s condorpool -o local nowcast.yml
+pegasus-plan --submit -s compute -o local nowcast.yml
 ```
 
 ⚠ `--mode nowcast` **without** `--reuse-dir` is a trap: it recomputes the
@@ -402,14 +402,21 @@ The other modes exist to do *less*:
 --start-date / --end-date              override the fetch window (YYYY-MM-DD)
 --reuse-dir DIR                        reuse already-fetched/computed products
 --config PATH                          default: site_config.json
--e / --execution-site-name NAME        default: condorpool
+-e / --execution-site NAME             default: compute (hosted catalogs' site name)
+-s / --hosted-site-catalog FILE        hosted site catalog, e.g. unity.yml
+                                       (default: the one in ~/.pegasusrc)
+--site-style {auto,condor,slurm,none}  auto: keep sites.yml/hosted entry, else
+                                       write compute as an HTCondor pool
+--queue / --project                    Slurm partition and account
+--site-scratch / --site-profile / --tag-profile / --shared-filesystem /
+--sites-yml                            see ./workflow_generator.py --help
 --container-image IMAGE                default: pegasus/cper-soilmoisture:m3
                                        a bare name means Docker Hub; a full
                                        URL (https:// or file:// to a SIF) is
                                        used as-is
 --no-container                         run in the site's native environment
 --exec-universe {container,vanilla}    default: container
---no-sites-catalog                     plan against the submit host's catalog
+--no-sites-catalog                     deprecated: same as --site-style none
 --inherit-pegasusrc                    layer our properties onto ~/.pegasusrc
 -o / --output FILE                     default: workflow.yml
 ```
@@ -436,9 +443,9 @@ Use `--exec-universe vanilla` to go back to PegasusLite launching apptainer
 itself, if a pool's HTCondor predates container universe.
 
 On a managed submit host like ACCESS Pegasus, two more flags matter:
-`--no-sites-catalog` plans against the platform's own site catalog
-(`pegasus.catalog.site.repo.file` in `~/.pegasusrc`) instead of the one we
-write — pass its site name to `-e` — and `--inherit-pegasusrc` layers our
+`-s <file>.yml` names the platform's hosted site catalog (or `--site-style
+none` plans against the catalog `~/.pegasusrc` points at, untouched — pass its
+site name to `-e`), and `--inherit-pegasusrc` layers our
 properties onto `~/.pegasusrc`, without which the generated
 `pegasus.properties` shadows the platform's settings entirely, since
 `pegasus-plan` reads one file or the other and never both.
