@@ -187,7 +187,7 @@ Pegasus, if you want the fetch itself tracked with provenance and retries:
 
 ```sh
 python3 workflow_generator.py --mode fetch -o fetch.yml
-pegasus-plan --submit -s compute -o local fetch.yml
+pegasus-plan --dir submit --submit -s compute -o local fetch.yml
 ```
 
 It is **not faster** — measured 7 m 18 s against the script's 4 m 23 s, because
@@ -199,9 +199,35 @@ record; both leave `inputs/` in the same state.
 
 ```sh
 python3 workflow_generator.py --reuse-dir inputs -o workflow.yml
-pegasus-plan --submit -s compute -o local workflow.yml
+pegasus-plan --dir submit --submit -s compute -o local workflow.yml
 pegasus-status <submit-dir>
 ```
+
+The generator writes the workflow and its catalogs and prints that
+`pegasus-plan` command; it never plans or submits by itself.
+
+### Site catalogs
+
+The generator writes no site catalog. Jobs run on a site named `compute`,
+which a [centrally hosted site catalog](https://github.com/pegasushub/pegasus-site-catalogs/tree/main/conf)
+defines: name it at generation time with `-s access-pegasus.yml` (or
+`unity.yml`, ...), or once in `~/.pegasusrc`
+(`pegasus.catalog.site.repo.file = ...`, as the ACCESS Pegasus setup notebook
+does). On a plain HTCondor pool with no catalog, use Pegasus's built-in
+`condorpool` site instead:
+
+```sh
+python3 workflow_generator.py --reuse-dir inputs -e condorpool -o workflow.yml
+pegasus-plan --dir submit --submit -s condorpool -o local workflow.yml
+```
+
+With no site catalog, Pegasus's built-in `local` site stages the results to
+`./wf-output/`; the notebook's catalog (and a hosted catalog setup) stages
+them to `./output/`.
+
+The notebook (below) can instead write a self-contained local + HTCondor
+catalog for `compute` — `build_workflow(..., sites_catalog=True)`, which calls
+the `create_sites_catalog()` placeholder; the CLI never writes one.
 
 `--reuse-dir` registers everything already in that directory as a replica, and
 Pegasus prunes the job that would have produced it — so the run starts at
@@ -214,14 +240,23 @@ options as the command line — long names, dashes as underscores — and return
 workflow object you can drive in place, which is what
 `Access-CPER-SoilMoisture-Workflow.ipynb` does:
 
+```sh
+jupyter notebook Access-CPER-SoilMoisture-Workflow.ipynb
+```
+
+The same calls from any Python:
+
 ```python
 from workflow_generator import build_workflow
 
-fetch = build_workflow(mode="fetch", output_dir="inputs")
-fetch.plan_submit()          # pegasus-plan --submit -s <site> -o local
+# sites_catalog=True writes a local + HTCondor catalog for "compute"; drop it
+# (or pass hosted_site_catalog="unity.yml") when a hosted catalog applies.
+fetch = build_workflow(mode="fetch", output_dir="inputs", sites_catalog=True)
+fetch.plan_submit()          # pegasus-plan --dir submit --submit -s compute -o local
 fetch.wait()                 # blocks until the DAG finishes
 
-run = build_workflow(mode="all", reuse_dir="inputs")   # build AFTER the fetch
+run = build_workflow(mode="all", reuse_dir="inputs",    # build AFTER the fetch
+                     sites_catalog=True)
 run.plan_submit()
 run.wait()
 run.statistics()             # per-stage cost; .analyze() if it failed
@@ -277,7 +312,7 @@ recomputed:
 
 ```sh
 python3 workflow_generator.py --mode nowcast --reuse-dir output -o nowcast.yml
-pegasus-plan --submit -s compute -o local nowcast.yml
+pegasus-plan --dir submit --submit -s compute -o local nowcast.yml
 ```
 
 ⚠ `--mode nowcast` **without** `--reuse-dir` is a trap: it recomputes the
@@ -402,29 +437,28 @@ The other modes exist to do *less*:
 --start-date / --end-date              override the fetch window (YYYY-MM-DD)
 --reuse-dir DIR                        reuse already-fetched/computed products
 --config PATH                          default: site_config.json
--e / --execution-site NAME             default: compute (hosted catalogs' site name)
--s / --hosted-site-catalog FILE        hosted site catalog, e.g. unity.yml
+-s / --hosted-site-catalog FILE        hosted site catalog to plan against,
+                                       e.g. access-pegasus.yml, unity.yml
                                        (default: the one in ~/.pegasusrc)
---site-style {auto,condor,slurm,none}  auto: keep sites.yml/hosted entry, else
-                                       write compute as an HTCondor pool
---queue / --project                    Slurm partition and account
---site-scratch / --site-profile / --tag-profile / --shared-filesystem /
---sites-yml                            see ./workflow_generator.py --help
+-e / --execution-site-name NAME        default: compute; condorpool on a plain
+                                       HTCondor pool with no site catalog
 --container-image IMAGE                default: pegasus/cper-soilmoisture:m3
                                        a bare name means Docker Hub; a full
                                        URL (https:// or file:// to a SIF) is
                                        used as-is
 --no-container                         run in the site's native environment
---exec-universe {container,vanilla}    default: container
---no-sites-catalog                     deprecated: same as --site-style none
---inherit-pegasusrc                    layer our properties onto ~/.pegasusrc
+--inherit-pegasusrc                    copy ~/.pegasusrc into pegasus.properties
 -o / --output FILE                     default: workflow.yml
 ```
 
 ### Which HTCondor universe
 
-Jobs run in **container universe** by default: HTCondor creates the container
-and PegasusLite runs inside it, with the image staged in as a data dependency.
+The universe is the site catalog's choice, not the generator's.
+`access-pegasus.yml` and the notebook's local catalog (`build_workflow(...,
+sites_catalog=True)`, universe `container` unless you pass
+`universe="vanilla"`) use **container universe**: HTCondor creates the
+container and PegasusLite runs inside it, with the image staged in as a data
+dependency. Pegasus's built-in `condorpool` (`-e condorpool`) is vanilla.
 Pegasus recommends this for every HTCondor pool, and it is the only thing that
 works where the execution point is *itself* an unprivileged container — OSG /
 OSPool / PATh, which is what **ACCESS Pegasus** provisions. There, the older
@@ -439,22 +473,24 @@ That is a nested unprivileged apptainer, not a workflow bug — and note that a
 Pegasus example running fine on the same pool (the ACCESS Quickstart, say)
 proves nothing, because it declares no container at all.
 
-Use `--exec-universe vanilla` to go back to PegasusLite launching apptainer
-itself, if a pool's HTCondor predates container universe.
+For a pool whose HTCondor predates container universe, use a vanilla-universe
+catalog (the notebook's `universe="vanilla"`, or `-e condorpool`), which puts
+PegasusLite back in charge of launching apptainer.
 
-On a managed submit host like ACCESS Pegasus, two more flags matter:
-`-s <file>.yml` names the platform's hosted site catalog (or `--site-style
-none` plans against the catalog `~/.pegasusrc` points at, untouched — pass its
-site name to `-e`), and `--inherit-pegasusrc` layers our
-properties onto `~/.pegasusrc`, without which the generated
-`pegasus.properties` shadows the platform's settings entirely, since
-`pegasus-plan` reads one file or the other and never both.
+On a managed submit host like ACCESS Pegasus, the platform's `~/.pegasusrc`
+already names its hosted site catalog, and `pegasus-plan` layers the
+generated `pegasus.properties` over `~/.pegasusrc` (Pegasus reference guide,
+"Priority Order for Loading Properties"), so it applies as is — generate with
+the default `-e compute`. `--inherit-pegasusrc` additionally copies
+`~/.pegasusrc` into the generated file, so the settings travel with the
+workflow files.
 
 Explicit `--start-date/--end-date` win over the config windows. Each fetch job
 carries a DAGMan retry of 2 for transient API failures.
 
-⚠ The generated catalogs (`replicas.yml`, `sites.yml`, `transformations.yml`,
-`pegasus.properties`) use **fixed filenames** regardless of `-o`. Generating two
+⚠ The generated catalogs (`replicas.yml`, `transformations.yml`,
+`pegasus.properties`, and `sites.yml` when the notebook writes one) use
+**fixed filenames** regardless of `-o`. Generating two
 variants back-to-back and then planning both will plan the second one's
 catalogs twice — always pair generate → plan.
 
