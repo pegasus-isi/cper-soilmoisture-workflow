@@ -6,7 +6,7 @@
 #
 #     ./fetch_data.sh
 #     python3 workflow_generator.py --reuse-dir inputs -o workflow.yml
-#     pegasus-plan --dir submit --submit -s compute -o local workflow.yml   # -e/-s condorpool on a pool with no site catalog
+#     pegasus-plan --dir submit --submit -s compute -o local --output-dir "$PWD/output" workflow.yml   # -e/-s condorpool on a pool with no site catalog
 #
 # Pegasus registers everything it finds in --reuse-dir as a replica and prunes
 # the job that would have produced it, so the run starts at `harmonize` instead
@@ -234,7 +234,7 @@ cat <<EOF
 
 Next:
     python3 workflow_generator.py --reuse-dir $OUT -o workflow.yml
-    pegasus-plan --dir submit --submit -s compute -o local workflow.yml   # -e/-s condorpool on a pool with no site catalog
+    pegasus-plan --dir submit --submit -s compute -o local --output-dir "$PWD/output" workflow.yml   # -e/-s condorpool on a pool with no site catalog
 
 Empty files are expected for a source with no data in the window (a dark
 station, for instance) — harmonize fails only if *every* source is empty.

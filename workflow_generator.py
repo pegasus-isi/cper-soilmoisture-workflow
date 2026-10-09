@@ -1151,8 +1151,11 @@ def main():
 
     logger.info("Next steps:")
     logger.info("  1. Review workflow: %s", args.output)
+    # --output-dir: no site catalog defines "local", so Pegasus's built-in local
+    # site would otherwise stage outputs to ./wf-output.
     logger.info("  2. Plan and submit: pegasus-plan --dir submit -s %s -o local "
-                "--submit %s", args.execution_site_name, args.output)
+                "--output-dir %s --submit %s", args.execution_site_name,
+                wf.local_storage_dir, args.output)
     logger.info("  3. Monitor: pegasus-status <submit_dir>")
     if args.mode == "fetch":
         logger.info("\nThis is a download-only DAG. When it finishes, run "

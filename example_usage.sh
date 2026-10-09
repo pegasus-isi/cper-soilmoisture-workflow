@@ -9,7 +9,7 @@
 #
 #     ./fetch_data.sh
 #     python3 workflow_generator.py --reuse-dir output -o workflow.yml
-#     pegasus-plan --dir submit --submit -s compute -o local workflow.yml   # -e/-s condorpool on a pool with no site catalog
+#     pegasus-plan --dir submit --submit -s compute -o local --output-dir "$PWD/output" workflow.yml   # -e/-s condorpool on a pool with no site catalog
 #
 set -euo pipefail
 cd "$(dirname "$0")"

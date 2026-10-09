@@ -186,8 +186,8 @@ There is also a `--mode fetch` DAG that does the same downloads through
 Pegasus, if you want the fetch itself tracked with provenance and retries:
 
 ```sh
-python3 workflow_generator.py --mode fetch -o fetch.yml
-pegasus-plan --dir submit --submit -s compute -o local fetch.yml
+python3 workflow_generator.py --mode fetch --output-dir inputs -o fetch.yml
+pegasus-plan --dir submit --submit -s compute -o local --output-dir "$PWD/inputs" fetch.yml
 ```
 
 It is **not faster** — measured 7 m 18 s against the script's 4 m 23 s, because
@@ -199,7 +199,7 @@ record; both leave `inputs/` in the same state.
 
 ```sh
 python3 workflow_generator.py --reuse-dir inputs -o workflow.yml
-pegasus-plan --dir submit --submit -s compute -o local workflow.yml
+pegasus-plan --dir submit --submit -s compute -o local --output-dir "$PWD/output" workflow.yml
 pegasus-status <submit-dir>
 ```
 
@@ -218,12 +218,12 @@ does). On a plain HTCondor pool with no catalog, use Pegasus's built-in
 
 ```sh
 python3 workflow_generator.py --reuse-dir inputs -e condorpool -o workflow.yml
-pegasus-plan --dir submit --submit -s condorpool -o local workflow.yml
+pegasus-plan --dir submit --submit -s condorpool -o local --output-dir "$PWD/output" workflow.yml
 ```
 
-With no site catalog, Pegasus's built-in `local` site stages the results to
-`./wf-output/`; the notebook's catalog (and a hosted catalog setup) stages
-them to `./output/`.
+Results land in `./output/` (or the generator's `--output-dir`): the printed
+plan command passes `--output-dir` (otherwise Pegasus's built-in `local` site
+would use `./wf-output/`), and the notebook's catalog stages them there too.
 
 The notebook (below) can instead write a self-contained local + HTCondor
 catalog for `compute` — `build_workflow(..., sites_catalog=True)`, which calls
@@ -312,7 +312,7 @@ recomputed:
 
 ```sh
 python3 workflow_generator.py --mode nowcast --reuse-dir output -o nowcast.yml
-pegasus-plan --dir submit --submit -s compute -o local nowcast.yml
+pegasus-plan --dir submit --submit -s compute -o local --output-dir "$PWD/output" nowcast.yml
 ```
 
 ⚠ `--mode nowcast` **without** `--reuse-dir` is a trap: it recomputes the
