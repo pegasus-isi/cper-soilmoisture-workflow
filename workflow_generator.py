@@ -59,6 +59,14 @@ Usage:
     ./workflow_generator.py --config site_config.json -o workflow.yml
     ./workflow_generator.py --mode fetch -o fetch.yml          # download once
     ./workflow_generator.py --reuse-dir output -o workflow.yml  # then reuse it
+
+Sites follow pegasus-isi/pegasus-gromacs: jobs run on a site named "compute",
+defined by a centrally hosted site catalog (-s access-pegasus.yml, ...;
+https://github.com/pegasushub/pegasus-site-catalogs) or by one in
+~/.pegasusrc. The generator writes no site catalog; on a plain HTCondor pool
+with no catalog, use -e condorpool. It never plans or submits: it prints the
+pegasus-plan command (the notebook submits from an explicit cell, and calls
+create_sites_catalog() for a self-contained local HTCondor catalog).
 """
 
 import argparse
@@ -164,9 +172,9 @@ class CperSoilMoistureWorkflow:
         self.reuse_dir = os.path.abspath(reuse_dir) if reuse_dir else None
         self.reused = []
         self.produced = []
-        # Set by create_sites_catalog / create_workflow; plan_submit() defaults
-        # to it so a caller never has to repeat the site name.
-        self.exec_site_name = "condorpool"
+        # Set by build_workflow(); plan_submit() defaults to it so a caller
+        # never has to repeat the site name.
+        self.exec_site_name = "compute"
 
     def write(self):
         if self.sc is not None:
@@ -194,13 +202,19 @@ class CperSoilMoistureWorkflow:
         """
         return getattr(self.wf, "_submit_dir", None)
 
-    def plan_submit(self, sites=None, output_site="local", submit=True):
-        """Plan (and by default submit) this workflow."""
+    def plan_submit(self, exec_site_name=None, raise_errors=False,
+                    output_site="local", submit=True):
+        """Plan (and by default submit) this workflow on exec_site_name
+        (default: the site it was generated for)."""
         try:
-            self.wf.plan(sites=sites or [self.exec_site_name],
-                         output_sites=[output_site], submit=submit)
+            self.wf.plan(dir="submit",
+                         sites=[exec_site_name or self.exec_site_name],
+                         output_sites=[output_site], cleanup="none",
+                         verbose=1, submit=submit)
         except PegasusClientError as exc:
             print(exc)
+            if raise_errors:
+                raise
         if self.submit_dir:
             logger.info("Run directory: %s", self.submit_dir)
         return self
@@ -235,13 +249,13 @@ class CperSoilMoistureWorkflow:
             print(exc)
         return self
 
-    def create_pegasus_properties(self, inherit_pegasusrc=False):
+    def create_pegasus_properties(self, inherit_pegasusrc=False,
+                                  hosted_site_catalog=None):
         self.props = Properties()
-        # pegasus-plan reads ./pegasus.properties INSTEAD of ~/.pegasusrc, so on
-        # a managed submit host (ACCESS Pegasus writes its site catalog pointer,
-        # staging site and data configuration into ~/.pegasusrc) the file we
-        # generate here silently shadows the platform's own settings. Opt in to
-        # layering ours on top of theirs.
+        # Opt-in: copy ~/.pegasusrc into the generated pegasus.properties so a
+        # managed submit host's settings (ACCESS Pegasus writes its site
+        # catalog pointer, staging site and data configuration there) travel
+        # with the workflow files.
         if inherit_pegasusrc:
             rc_path = Path.home() / ".pegasusrc"
             if rc_path.exists():
@@ -258,12 +272,25 @@ class CperSoilMoistureWorkflow:
                 logger.warning("--inherit-pegasusrc: no %s to inherit from",
                                rc_path)
         self.props["pegasus.transfer.threads"] = "16"
+        if hosted_site_catalog:
+            # Use one of Pegasus' centrally hosted site catalogs instead of
+            # a locally generated one. pegasus-plan downloads and caches the
+            # named file from the catalog repository at plan time.
+            # https://pegasus.isi.edu/documentation/reference-guide/catalogs.html#centrally-hosted-site-catalogs
+            self.props["pegasus.catalog.site.repo.file"] = hosted_site_catalog
 
-    def create_sites_catalog(self, exec_site_name="condorpool",
+    # ------------------------------------------------------------------
+    # Site Catalog
+    #
+    # Not used by the CLI — pegasus-plan resolves the site catalog from a
+    # centrally hosted one instead (-s/--hosted-site-catalog or ~/.pegasusrc).
+    # Kept for notebook use (build_workflow(sites_catalog=True)) when a
+    # self-contained, locally generated HTCondor site catalog is wanted.
+    # ------------------------------------------------------------------
+    def create_sites_catalog(self, exec_site_name="compute",
                              universe="container"):
         logger.info("Creating site catalog for execution site: %s (%s universe)",
                     exec_site_name, universe)
-        self.exec_site_name = exec_site_name
         self.sc = SiteCatalog()
         local = Site("local").add_directories(
             Directory(Directory.SHARED_SCRATCH, self.shared_scratch_dir).add_file_servers(
@@ -323,8 +350,11 @@ class CperSoilMoistureWorkflow:
                 "n_total_outputs": len(self.produced),
                 "missing": missing}
 
-    def create_transformation_catalog(self, exec_site_name, container_image,
-                                      use_container=True):
+    def create_transformation_catalog(self, container_image,
+                                      use_container=True,
+                                      exec_site_name="compute"):
+        """Containers and transformations, registered on the execution site;
+        the scripts are staged from the submit host."""
         logger.info("Creating transformation catalog")
         self.tc = TransformationCatalog()
         container = None
@@ -549,7 +579,7 @@ class CperSoilMoistureWorkflow:
         dates = ["--start-date", start, "--end-date", end]
         fetch_jobs, source_obs = [], []
         for source in args.sources:
-            transformation, _, _ = FETCHERS[source]
+            transformation = FETCHERS[source][0]
 
             # NEON serves one package per site-month, so a multi-year
             # characterization window is naturally a fan-out: one job per
@@ -912,8 +942,20 @@ def _build_parser():
                              "at CPER (no public data).")
     parser.add_argument("--start-date", help="Override start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", help="Override end date (YYYY-MM-DD)")
-    parser.add_argument("-e", "--execution-site-name", default="condorpool",
-                        help="HTCondor pool name for execution")
+    parser.add_argument("-s", "--hosted-site-catalog", metavar="FILE",
+                        default=None,
+                        help="Name of a Pegasus centrally hosted site catalog "
+                             "to plan against (e.g. access-pegasus.yml), "
+                             "instead of a locally generated one. Sets "
+                             "pegasus.catalog.site.repo.file; see "
+                             "https://pegasus.isi.edu/documentation/"
+                             "reference-guide/catalogs.html"
+                             "#centrally-hosted-site-catalogs")
+    parser.add_argument("-e", "--execution-site-name", metavar="STR",
+                        default="compute",
+                        help="Execution site name (default: compute; "
+                             "condorpool on a plain HTCondor pool with no "
+                             "site catalog)")
     parser.add_argument("--container-image",
                         default="Apptainer/CPER_SoilMoisture_Container.sif",
                         help="Container for workflow jobs: a path to a locally "
@@ -922,33 +964,11 @@ def _build_parser():
                              "docker:// URL, or a bare Docker Hub image name. "
                              "SPEC.md 'Container': new filename per milestone, "
                              "don't mutate one in place")
-    parser.add_argument("--exec-universe", default=None,
-                        choices=["vanilla", "container"],
-                        help="HTCondor universe for the execution site. "
-                             "Default 'container': HTCondor starts the "
-                             "container and PegasusLite runs inside it, which "
-                             "is what Pegasus recommends for every HTCondor "
-                             "pool and the only thing that works where the "
-                             "execution point is itself an unprivileged "
-                             "container (OSG / OSPool / PATh, i.e. ACCESS "
-                             "Pegasus) — there, a nested apptainer dies with "
-                             "'Failed to set mount propagation: Permission "
-                             "denied'. 'vanilla' has PegasusLite launch "
-                             "apptainer itself; use it if the pool's HTCondor "
-                             "is too old for container universe. Implied by "
-                             "--no-container.")
-    parser.add_argument("--no-sites-catalog", action="store_true",
-                        help="Do not write sites.yml; plan against the site "
-                             "catalog the submit host already provides (ACCESS "
-                             "Pegasus points at one from ~/.pegasusrc via "
-                             "pegasus.catalog.site.repo.file). Pair it with "
-                             "--inherit-pegasusrc and pass that platform's own "
-                             "site name to -e.")
     parser.add_argument("--inherit-pegasusrc", action="store_true",
-                        help="Seed the generated pegasus.properties from "
-                             "~/.pegasusrc before adding ours. Without this, "
-                             "the generated file SHADOWS ~/.pegasusrc entirely "
-                             "— pegasus-plan reads one or the other, not both.")
+                        help="Copy ~/.pegasusrc into the generated "
+                             "pegasus.properties before adding ours, so the "
+                             "submit host's settings travel with the "
+                             "workflow files.")
     parser.add_argument("--no-container", action="store_true",
                         help="Run jobs in the execution site's native "
                              "environment instead of the container. Use when "
@@ -1021,30 +1041,14 @@ def _resolve(args):
         if not args.sources:
             raise ValueError("No usable sources selected")
 
-    # --exec-universe defaults to 'container' (see the flag's help), but there
-    # is nothing for that universe to start when --no-container removed the
-    # container, so that flag falls back to vanilla rather than erroring.
-    if args.no_container:
-        if args.exec_universe == "container":
-            raise ValueError(
-                "--exec-universe container and --no-container contradict each "
-                "other: the container universe exists to run the container. "
-                "Pick one.")
-        args.exec_universe = "vanilla"
-    elif args.exec_universe is None:
-        args.exec_universe = "container"
-    if args.exec_universe == "container" and args.no_sites_catalog:
-        logger.warning("--exec-universe container has no effect together with "
-                       "--no-sites-catalog: the universe is a site-catalog "
-                       "profile, so the submit host's own catalog decides.")
-
     if not os.path.exists(args.config):
         raise ValueError("Config file not found: %s" % args.config)
     with open(args.config) as fh:
         return json.load(fh)
 
 
-def build_workflow(write=True, **overrides):
+def build_workflow(write=True, sites_catalog=False, universe="container",
+                   **overrides):
     """Build (and by default write) the workflow, returning the object.
 
     This is the entry point for notebooks: it takes the same options as the
@@ -1053,10 +1057,24 @@ def build_workflow(write=True, **overrides):
     drive the run. Defaults come from the argument parser itself, so the CLI
     and a notebook cannot drift apart.
 
-        fetch = build_workflow(mode="fetch", output_dir="inputs")
+    sites_catalog=True also writes the create_sites_catalog() placeholder — a
+    self-contained local + HTCondor catalog for the execution site, in the
+    given HTCondor universe — for a pool with no hosted site catalog. The CLI
+    never does this.
+
+        fetch = build_workflow(mode="fetch", output_dir="inputs",
+                               sites_catalog=True)
         fetch.plan_submit().wait()
     """
     defaults = vars(_build_parser().parse_args([]))
+    # Older notebooks: -e was briefly stored as execution_site, and the
+    # universe was a CLI option; no_sites_catalog meant "write none", which is
+    # now the default.
+    if "execution_site" in overrides:
+        overrides["execution_site_name"] = overrides.pop("execution_site")
+    if "exec_universe" in overrides:
+        universe = overrides.pop("exec_universe") or universe
+    overrides.pop("no_sites_catalog", None)
     unknown = sorted(set(overrides) - set(defaults))
     if unknown:
         raise TypeError("unknown option(s): %s. Known: %s"
@@ -1067,20 +1085,19 @@ def build_workflow(write=True, **overrides):
     wf = CperSoilMoistureWorkflow(dagfile=args.output,
                                   reuse_dir=args.reuse_dir,
                                   output_dir=args.output_dir)
-    wf.create_pegasus_properties(inherit_pegasusrc=args.inherit_pegasusrc)
-    if args.no_sites_catalog:
-        logger.info("Not writing sites.yml: planning will use the submit "
-                    "host's own site catalog. Site '%s' must exist there.",
-                    args.execution_site_name)
-        wf.exec_site_name = args.execution_site_name
-    else:
-        wf.create_sites_catalog(exec_site_name=args.execution_site_name,
-                                universe=args.exec_universe)
+    wf.exec_site_name = args.execution_site_name
+
+    wf.create_pegasus_properties(inherit_pegasusrc=args.inherit_pegasusrc,
+                                 hosted_site_catalog=args.hosted_site_catalog)
+    if sites_catalog:
+        wf.create_sites_catalog(args.execution_site_name,
+                                universe="vanilla" if args.no_container
+                                else universe)
     wf.create_replica_catalog()
     wf.create_transformation_catalog(
-        exec_site_name=args.execution_site_name,
         container_image=args.container_image,
         use_container=not args.no_container,
+        exec_site_name=args.execution_site_name,
     )
     wf.create_workflow(args, config)
     if write:
@@ -1095,12 +1112,13 @@ def build_workflow(write=True, **overrides):
                           for b in sorted(MODE_BRANCHES[args.mode])))
     logger.info("  Sources: %s", ", ".join(args.sources))
     logger.info("  Outputs: %s", wf.local_storage_dir)
-    logger.info("  Execution: site %s, %s", args.execution_site_name,
-                "site catalog from the submit host"
-                if args.no_sites_catalog
-                else "%s universe, container %s" % (
-                    args.exec_universe,
-                    "disabled" if args.no_container else args.container_image))
+    logger.info("  Execution: site %s, container %s", args.execution_site_name,
+                "disabled" if args.no_container else args.container_image)
+    logger.info("  Site catalog: %s",
+                "local + HTCondor (create_sites_catalog)" if sites_catalog
+                else "hosted %s" % args.hosted_site_catalog
+                if args.hosted_site_catalog
+                else "none written — from ~/.pegasusrc, or use -e condorpool")
     logger.info("  Jobs: %d", len(wf.wf.jobs))
     summary = wf.reuse_summary()
     if summary:
@@ -1133,8 +1151,11 @@ def main():
 
     logger.info("Next steps:")
     logger.info("  1. Review workflow: %s", args.output)
-    logger.info("  2. Submit: pegasus-plan --submit -s %s -o local %s",
-                args.execution_site_name, args.output)
+    # --output-dir: no site catalog defines "local", so Pegasus's built-in local
+    # site would otherwise stage outputs to ./wf-output.
+    logger.info("  2. Plan and submit: pegasus-plan --dir submit -s %s -o local "
+                "--output-dir %s --submit %s", args.execution_site_name,
+                wf.local_storage_dir, args.output)
     logger.info("  3. Monitor: pegasus-status <submit_dir>")
     if args.mode == "fetch":
         logger.info("\nThis is a download-only DAG. When it finishes, run "
